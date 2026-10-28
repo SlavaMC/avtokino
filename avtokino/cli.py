@@ -17,7 +17,7 @@ from pathlib import Path
 from . import __version__
 from .assemble import build_music, concat_audio, mix_audio, mux
 from .config import IGNORED_NAMES, PHOTO_EXTS, VIDEO_EXTS, Settings
-from .dating import estimate_offset, fs_date, name_date, photo_meta, resolve, video_meta
+from .dating import check_utc, estimate_offset, fs_date, name_date, photo_meta, resolve, video_meta
 from .naming import choose_output, output_pattern, parse_dir_name
 from .planner import Item, build_plan, choose_base, fps_str
 from .probe import HEIF_SUPPORTED, probe_photo, probe_video
@@ -228,6 +228,7 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
 
     # анализ файлов
     raw: list[tuple[Path, str, object, object, object, object]] = []
+    votes = []
     for p in video_paths:
         try:
             info = probe_video(s.ffprobe, p)
@@ -241,7 +242,11 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
         if info.duration < s.min_clip:
             log.info("Пропуск %s: короче %.0f с (%.1f с)", rel, s.min_clip, info.duration)
             continue
-        raw.append((p, "video", info, video_meta(info), name_date(p), fs_date(p)))
+        fs = fs_date(p)
+        meta, vote = check_utc(video_meta(info), fs, info.duration)
+        if vote is not None:
+            votes.append(vote)
+        raw.append((p, "video", info, meta, name_date(p), fs))
     for p in photo_paths:
         try:
             info = probe_photo(p)
@@ -255,10 +260,10 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
         return 1
 
     # часовой пояс
-    est = estimate_offset([(r[3], r[4]) for r in raw])
+    est = estimate_offset([(r[3], r[4]) for r in raw], votes)
     if est and not s.tz:
-        offset, votes = est
-        tz_note = f"определён по {votes} файл(ам) с явным поясом или парой «UTC-метка + время в имени»"
+        offset, n_votes = est
+        tz_note = f"определён автоматически, голосов: {n_votes}"
     else:
         sample = next((r[3] or r[4] or r[5]).value for r in raw)
         offset, tz_note = _tz_offset(s.tz, sample.replace(tzinfo=None))

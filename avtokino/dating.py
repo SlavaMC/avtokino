@@ -75,7 +75,51 @@ def photo_meta(info: PhotoInfo) -> Evidence | None:
     return Evidence(dt, "local", info.exif_tag or "EXIF")
 
 
+_AVCHD_UUID = bytes.fromhex("17ee8c60f84d11d98cd6080020 0c9a66".replace(" ", ""))
+
+
+def _bcd(b: int) -> int:
+    if (b >> 4) > 9 or (b & 0x0F) > 9:
+        raise ValueError
+    return (b >> 4) * 10 + (b & 0x0F)
+
+
+def avchd_date(path: Path) -> Evidence | None:
+    """Дата съёмки из потока AVCHD (.MTS/.M2TS): блок MDPM в SEI H.264, как у камер Sony/Panasonic."""
+    with open(path, "rb") as f:
+        data = f.read(2_000_000)
+    pos = data.find(_AVCHD_UUID)
+    while pos >= 0:
+        win = data[pos + 16:pos + 120].replace(b"\x00\x00\x03", b"\x00\x00")
+        i = win.find(b"\x18")
+        while 0 <= i <= len(win) - 10:
+            if win[i + 5] == 0x19:
+                try:
+                    tz, y1, y2, mo = win[i + 1:i + 5]
+                    d, hh, mm, ss = win[i + 6:i + 10]
+                    dt = datetime(_bcd(y1) * 100 + _bcd(y2), _bcd(mo), _bcd(d), _bcd(hh), _bcd(mm), _bcd(ss))
+                except ValueError:
+                    dt = None
+                if dt and _valid(dt):
+                    hours, half = (tz >> 1) & 0x0F, tz & 0x01
+                    if hours <= 14:
+                        sign = -1 if tz & 0x20 else 1
+                        off = timezone(sign * timedelta(hours=hours, minutes=30 * half))
+                        return Evidence(dt.replace(tzinfo=off), "aware", "AVCHD MDPM")
+                    return Evidence(dt, "local", "AVCHD MDPM")
+            i = win.find(b"\x18", i + 1)
+        pos = data.find(_AVCHD_UUID, pos + 16)
+    return None
+
+
 def video_meta(info: VideoInfo) -> Evidence | None:
+    if info.path.suffix.lower() in (".mts", ".m2ts"):
+        try:
+            ev = avchd_date(info.path)
+        except OSError:
+            ev = None
+        if ev:
+            return ev
     apple = info.tags.get("com.apple.quicktime.creationdate")
     if apple:
         dt = _parse_iso(apple)
@@ -87,8 +131,31 @@ def video_meta(info: VideoInfo) -> Evidence | None:
         if dt and _valid(dt):
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
+            if any("gopro" in str(v).lower() for v in info.tags.values()):
+                # GoPro пишет местное время с пометкой UTC
+                return Evidence(dt.replace(tzinfo=None), "local", "метаданные creation_time (GoPro, местное)")
             return Evidence(dt, "utc", "метаданные creation_time (UTC)")
     return None
+
+
+def check_utc(meta: Evidence | None, fs: Evidence, duration: float) -> tuple[Evidence | None, timedelta | None]:
+    """Многие камеры пишут в creation_time местное время с пометкой UTC.
+
+    Сверяем с временем изменения файла (конец записи): если они расходятся ровно
+    на часовой пояс, считаем creation_time местным, а расхождение - смещением пояса.
+    """
+    if not meta or meta.kind != "utc" or fs.source != "дата изменения файла":
+        return meta, None
+    end = meta.value + timedelta(seconds=duration)
+    diff = end - fs.value
+    if abs(diff.total_seconds()) < 120:
+        return meta, None
+    off = _round_offset(diff)
+    if off is None:
+        return meta, None
+    local = Evidence(meta.value.replace(tzinfo=None), "local",
+                     "метаданные creation_time (местное, сверено с датой файла)")
+    return local, off
 
 
 # --- имя файла --------------------------------------------------------------
@@ -146,9 +213,10 @@ def _round_offset(delta: timedelta) -> timedelta | None:
     return timedelta(minutes=rounded)
 
 
-def estimate_offset(items: list[tuple[Evidence | None, Evidence | None]]) -> tuple[timedelta, int] | None:
+def estimate_offset(items: list[tuple[Evidence | None, Evidence | None]],
+                    extra: list[timedelta] = ()) -> tuple[timedelta, int] | None:
     """items: пары (метаданные, имя файла). Возвращает (смещение, число голосов)."""
-    votes: Counter[timedelta] = Counter()
+    votes: Counter[timedelta] = Counter(extra)
     for meta, name in items:
         if meta and meta.kind == "aware":
             votes[meta.value.utcoffset()] += 1
