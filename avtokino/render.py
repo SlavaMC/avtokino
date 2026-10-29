@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -23,8 +24,20 @@ TONEMAP = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
            "tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv")
 
 
+CAPTION_FADE = 0.5
+
+
 class RenderError(RuntimeError):
     pass
+
+
+@dataclass
+class RenderContext:
+    tonemap_ok: bool
+    title_lines: list[str]
+    caption: Image.Image | None = None      # RGBA во весь кадр
+    caption_path: Path | None = None
+    caption_box: tuple[int, int, int, int] | None = None
 
 
 def run(cmd: list[str], stdin=None) -> None:
@@ -60,38 +73,66 @@ def _fade(duration: float, s: Settings, audio: bool = False) -> str:
     return f",{name}=t=in:st=0:d={t:.3f},{name}=t=out:st={duration - t:.3f}:d={t:.3f}"
 
 
-def render_video(seg: Segment, base: Base, s: Settings, out: Path, tonemap_ok: bool) -> None:
+def _caption_fades(seg: Segment, s: Settings) -> tuple[float, str]:
+    """Сколько секунд подпись видна в сегменте и фильтры её плавного появления/исчезновения."""
+    shown = min(seg.duration, s.caption_duration - seg.start)
+    fades = []
+    if seg.start == 0:
+        fades.append(f"fade=t=in:st=0:d={CAPTION_FADE}:alpha=1")
+    out_st = s.caption_duration - CAPTION_FADE - seg.start
+    if out_st < shown:
+        fades.append(f"fade=t=out:st={max(0.0, out_st):.3f}:d={min(CAPTION_FADE, shown):.3f}:alpha=1")
+    return shown, ",".join(fades)
+
+
+def render_video(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderContext) -> None:
     src = seg.item.path
-    cmd = [s.ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(src),
-           "-map", "0:v:0", "-an", "-sn", "-dn", "-map_metadata", "-1"]
+    v = seg.item.info
+    cmd = [s.ffmpeg, "-hide_banner", "-nostdin", "-y"]
+    if seg.duration < v.duration - 0.01:  # обрезка конца (GoPro)
+        cmd += ["-t", f"{seg.duration:.3f}"]
+    cmd += ["-i", str(src)]
     if seg.kind == "copy":
-        cmd += ["-c:v", "copy"]
+        cmd += ["-map", "0:v:0", "-an", "-sn", "-dn", "-map_metadata", "-1", "-c:v", "copy"]
     else:
-        v = seg.item.info
-        chain = []
+        chain = ["setpts=PTS-STARTPTS"]  # отсчёт от нуля: для переходов и подписи
         if v.field_order not in ("progressive", "unknown"):
             chain.append("bwdif")
         if v.hdr:
-            if tonemap_ok:
+            if ctx.tonemap_ok:
                 chain.append(TONEMAP)
             else:
                 log.warning("%s: HDR, но фильтр zscale недоступен, цвета могут быть блёклыми", seg.item.rel)
+        chain.append(_fit_filter(base))
         chain += [
-            f"scale={base.width}:{base.height}:force_original_aspect_ratio=decrease:flags=lanczos"
-            ":out_color_matrix=bt709:out_range=tv",
-            f"pad={base.width}:{base.height}:(ow-iw)/2:(oh-ih)/2:color=black",
             "setsar=1",
             f"fps={base.fps.numerator}/{base.fps.denominator}",
             "format=yuv420p",
         ]
         vf = ",".join(chain) + _fade(seg.duration, s)
-        cmd += ["-vf", vf] + encoder_args(base, s)
+        if seg.caption and ctx.caption_path:
+            shown, fades = _caption_fades(seg, s)
+            fps = f"{base.fps.numerator}/{base.fps.denominator}"
+            cmd += ["-loop", "1", "-framerate", fps, "-t", f"{shown:.3f}", "-i", str(ctx.caption_path)]
+            cap = "[1:v]format=rgba" + (f",{fades}" if fades else "") + "[cap]"
+            graph = f"[0:v:0]{vf}[main];{cap};[main][cap]overlay=0:0:eof_action=pass:format=auto,format=yuv420p[v]"
+            cmd += ["-filter_complex", graph, "-map", "[v]"]
+        else:
+            cmd += ["-map", "0:v:0", "-vf", vf]
+        cmd += ["-an", "-sn", "-dn", "-map_metadata", "-1"] + encoder_args(base, s)
     cmd += ["-f", "mpegts", str(out)]
     run(cmd)
 
 
-def _prepare_photo(img: Image.Image, base: Base, zoom: float) -> Image.Image:
-    fit = min(base.width / img.width, base.height / img.height)
+def _fit_filter(base: Base) -> str:
+    """Вписать видео в кадр целиком, с чёрными полями (режим --photo-fit касается только фото)."""
+    w, h = base.width, base.height
+    return (f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"
+            f":out_color_matrix=bt709:out_range=tv,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black")
+
+
+def _prepare_photo(img: Image.Image, base: Base, zoom: float, cover: bool = False) -> Image.Image:
+    fit = (max if cover else min)(base.width / img.width, base.height / img.height)
     size = (max(1, round(img.width * fit * zoom)), max(1, round(img.height * fit * zoom)))
     return img.resize(size, Image.LANCZOS)
 
@@ -106,7 +147,23 @@ def _frames(prepared: Image.Image, base: Base, zoom: float, n: int, zoom_in: boo
         k = zoom / z  # пикселей подготовленного изображения на пиксель кадра
         data = (k, 0, pw / 2 - k * W / 2, 0, k, ph / 2 - k * H / 2)
         yield prepared.transform((W, H), Image.AFFINE, data, resample=Image.BICUBIC,
-                                 fillcolor=(0, 0, 0)).tobytes()
+                                 fillcolor=(0, 0, 0))
+
+
+def _with_caption(frames, seg: Segment, base: Base, s: Settings, ctx: RenderContext):
+    """Накладывает подпись на кадры фото/титра, пока идёт её время показа."""
+    fps = float(base.fps)
+    box = ctx.caption_box
+    cap = ctx.caption.crop(box) if seg.caption and ctx.caption and box else None
+    alpha = cap.getchannel("A") if cap else None
+    for i, frame in enumerate(frames):
+        if cap is not None:
+            t = seg.start + i / fps
+            k = min(1.0, t / CAPTION_FADE, (s.caption_duration - t) / CAPTION_FADE)
+            if k > 0:
+                mask = alpha if k >= 1 else alpha.point(lambda a, k=k: int(a * k))
+                frame.paste(cap, box[:2], mask)
+        yield frame.tobytes()
 
 
 def _encode_frames(frames, n: int, base: Base, s: Settings, duration: float, out: Path) -> None:
@@ -128,18 +185,19 @@ def _encode_frames(frames, n: int, base: Base, s: Settings, duration: float, out
         raise RenderError("ffmpeg: " + " | ".join(err.strip().splitlines()[-5:]))
 
 
-def render_photo(seg: Segment, base: Base, s: Settings, out: Path) -> None:
+def render_photo(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderContext) -> None:
     n = max(1, round(seg.duration * float(base.fps)))
-    prepared = _prepare_photo(load_photo(seg.item.path), base, s.photo_zoom)
-    _encode_frames(_frames(prepared, base, s.photo_zoom, n, seg.zoom_in), n, base, s, seg.duration, out)
+    prepared = _prepare_photo(load_photo(seg.item.path), base, s.photo_zoom, s.photo_fit == "cover")
+    frames = _with_caption(_frames(prepared, base, s.photo_zoom, n, seg.zoom_in), seg, base, s, ctx)
+    _encode_frames(frames, n, base, s, seg.duration, out)
 
 
 _FONTS = ["DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
           "arial.ttf", "C:/Windows/Fonts/arial.ttf", "segoeui.ttf"]
 
 
-def _font(size: int):
-    for f in _FONTS:
+def _font(size: int, preferred: str | None = None):
+    for f in ([preferred] if preferred else []) + _FONTS:
         try:
             return ImageFont.truetype(f, size)
         except OSError:
@@ -147,7 +205,24 @@ def _font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def render_title(seg: Segment, base: Base, s: Settings, out: Path, lines: list[str]) -> None:
+def make_caption(base: Base, s: Settings, lines: list[str]) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """Подпись в правом нижнем углу: строки выровнены по правому краю, белый текст с чёрной обводкой."""
+    img = Image.new("RGBA", (base.width, base.height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    font = _font(max(12, round(base.height / 40)), s.caption_font)
+    stroke = max(1, round(base.height / 500))
+    right = base.width - round(base.width * 0.023)
+    y = base.height - round(base.height * 0.035)
+    line_h = round(base.height / 40 * 1.35)
+    for line in reversed(lines):
+        draw.text((right, y), line, font=font, anchor="rd", fill=(255, 255, 255, 255),
+                  stroke_width=stroke, stroke_fill=(0, 0, 0, 255))
+        y -= line_h
+    return img, img.getbbox() or (0, 0, 1, 1)
+
+
+def render_title(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderContext) -> None:
+    lines = ctx.title_lines
     img = Image.new("RGB", (base.width, base.height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
     sizes = [base.height // 12, base.height // 20]
@@ -161,7 +236,8 @@ def render_title(seg: Segment, base: Base, s: Settings, out: Path, lines: list[s
     n = max(1, round(seg.duration * float(base.fps)))
     zoom = 1.03
     prepared = _prepare_photo(img, base, zoom)
-    _encode_frames(_frames(prepared, base, zoom, n, True), n, base, s, seg.duration, out)
+    frames = _with_caption(_frames(prepared, base, zoom, n, True), seg, base, s, ctx)
+    _encode_frames(frames, n, base, s, seg.duration, out)
 
 
 def render_audio(seg: Segment, s: Settings, out: Path) -> None:
@@ -178,15 +254,14 @@ def render_audio(seg: Segment, s: Settings, out: Path) -> None:
     run(cmd)
 
 
-def render_segment(seg: Segment, base: Base, s: Settings, tmp: Path, tonemap_ok: bool,
-                   title_lines: list[str]) -> Segment:
+def render_segment(seg: Segment, base: Base, s: Settings, tmp: Path, ctx: RenderContext) -> Segment:
     vout = tmp / f"seg{seg.index:05d}.ts"
     if seg.kind in ("copy", "transcode"):
-        render_video(seg, base, s, vout, tonemap_ok)
+        render_video(seg, base, s, vout, ctx)
     elif seg.kind == "photo":
-        render_photo(seg, base, s, vout)
+        render_photo(seg, base, s, vout, ctx)
     else:
-        render_title(seg, base, s, vout, title_lines)
+        render_title(seg, base, s, vout, ctx)
     seg.video_path = vout
     seg.real_duration = probe_duration(s.ffprobe, vout)
     aout = tmp / f"seg{seg.index:05d}.wav"

@@ -41,6 +41,34 @@ class EventInfo:
             return f"{self.start:%d.%m.%Y} – {self.end:%d.%m.%Y}"
         return f"{self.start:%d.%m.%Y}"
 
+    def caption_date(self) -> str:
+        """Дата для подписи: «Август 2014», «15 июня 2024», «31 июля – 3 августа 2014»."""
+        s, e = self.start, self.end
+        if s is None:
+            return ""
+        if self.month_only:
+            return f"{MONTHS_NOM[s.month - 1]} {s.year}"
+        if not e or e == s:
+            return f"{s.day} {MONTHS_GEN[s.month - 1]} {s.year}"
+        if (s.year, s.month) == (e.year, e.month):
+            return f"{s.day}–{e.day} {MONTHS_GEN[s.month - 1]} {s.year}"
+        if s.year == e.year:
+            return f"{s.day} {MONTHS_GEN[s.month - 1]} – {e.day} {MONTHS_GEN[e.month - 1]} {s.year}"
+        return f"{s.day} {MONTHS_GEN[s.month - 1]} {s.year} – {e.day} {MONTHS_GEN[e.month - 1]} {e.year}"
+
+
+MONTHS_NOM = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август",
+              "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
+              "сентября", "октября", "ноября", "декабря"]
+
+# GoPro: GOPR0123 (HERO3-4), GP010123 (продолжения), GH010123 / GX010123 (HERO5 и новее)
+_GOPRO_RE = re.compile(r"^(GOPR\d{4}|GP\d{6}|G[HX]\d{6})$", re.IGNORECASE)
+
+
+def is_gopro(path: Path) -> bool:
+    return bool(_GOPRO_RE.match(path.stem))
+
 
 def parse_dir_name(raw: str) -> EventInfo:
     m = _DIR_RE.match(raw)

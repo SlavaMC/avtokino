@@ -43,6 +43,13 @@ class Settings:
     photo_burst_threshold: int = 5
     photo_zoom: float = 1.05
     min_clip: float = 5.0
+    gopro_trim: float = 0.0              # сколько секунд отрезать в конце роликов GoPro
+    photo_fit: str = "contain"           # contain = целиком с полями, cover = на весь кадр с обрезкой
+    caption: bool = False
+    caption_name: str | None = None
+    caption_date: str | None = None
+    caption_duration: float = 10.0
+    caption_font: str | None = None
     tz: str | None = None
     transition: str = "none"
     transition_duration: float = 0.5

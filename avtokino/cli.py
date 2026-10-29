@@ -19,9 +19,9 @@ from .assemble import build_music, concat_audio, mix_audio, mux
 from .config import IGNORED_NAMES, PHOTO_EXTS, VIDEO_EXTS, Settings
 from .dating import check_utc, estimate_offset, fs_date, name_date, photo_meta, resolve, video_meta
 from .naming import choose_output, output_pattern, parse_dir_name
-from .planner import Item, build_plan, choose_base, fps_str
+from .planner import Item, build_plan, choose_base, fps_str, gopro_trim
 from .probe import HEIF_SUPPORTED, probe_photo, probe_video
-from .render import has_filter, render_segment
+from .render import RenderContext, has_filter, make_caption, render_segment
 
 log = logging.getLogger("avtokino")
 
@@ -80,13 +80,25 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--photo-burst-threshold", type=int, default=5,
                    help="серия = больше стольких фото подряд (5)")
     g.add_argument("--photo-zoom", type=float, default=1.05, help="зум фото за кадр (1.05 = 5%%)")
-    g.add_argument("--min-clip", type=float, default=5.0, help="пропускать видео короче, с (5)")
+    g.add_argument("--min-clip", type=float, default=5.0,
+                   help="пропускать видео короче, с (5); для GoPro считается после обрезки")
+    g.add_argument("--gopro-trim", type=float, nargs="?", const=3.0, default=0.0, metavar="СЕК",
+                   help="отрезать конец у роликов GoPro (GOPR*, GP*, GH*, GX*); без числа — 3 с")
+    g.add_argument("--photo-fit", choices=["contain", "cover"], default="contain",
+                   help="фото: contain — целиком с чёрными полями, cover — на весь кадр с обрезкой")
     g.add_argument("--tz", help="часовой пояс съёмки (Europe/Moscow или +03:00), если не определился сам")
     g.add_argument("--transition", choices=["none", "fade"], default="none",
                    help="переходы: fade = через чёрное (требует перекодировки всех клипов)")
     g.add_argument("--transition-duration", type=float, default=0.5, help="длительность перехода, с")
     g.add_argument("--title", action="store_true", help="титр с названием и датой события в начале")
     g.add_argument("--title-duration", type=float, default=4.0, help="длительность титра, с")
+    g.add_argument("--caption", action="store_true",
+                   help="подпись (название и дата) в правом нижнем углу в начале ролика")
+    g.add_argument("--caption-name", metavar="ТЕКСТ", help="первая строка подписи (по умолчанию из имени каталога)")
+    g.add_argument("--caption-date", metavar="ТЕКСТ", help="вторая строка подписи (по умолчанию из даты каталога)")
+    g.add_argument("--caption-duration", type=float, default=10.0, metavar="СЕК",
+                   help="сколько секунд от начала показывать подпись (10)")
+    g.add_argument("--caption-font", metavar="ФАЙЛ", help="шрифт подписи (.ttf), например Roboto-Regular.ttf")
     g = p.add_argument_group("работа")
     g.add_argument("--jobs", type=int, default=2, help="параллельных задач рендера (2)")
     g.add_argument("--temp-dir", type=Path, help="каталог для временных файлов (по умолчанию в рабочем)")
@@ -105,6 +117,9 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         music_crossfade=a.music_crossfade, music_fadeout=a.music_fadeout, ducking=not a.no_ducking,
         photo_duration=a.photo_duration, photo_burst_duration=a.photo_burst_duration,
         photo_burst_threshold=a.photo_burst_threshold, photo_zoom=a.photo_zoom, min_clip=a.min_clip,
+        gopro_trim=a.gopro_trim, photo_fit=a.photo_fit,
+        caption=a.caption or bool(a.caption_name or a.caption_date), caption_name=a.caption_name,
+        caption_date=a.caption_date, caption_duration=a.caption_duration, caption_font=a.caption_font,
         tz=a.tz, transition=a.transition, transition_duration=a.transition_duration, title=a.title,
         title_duration=a.title_duration, jobs=max(1, a.jobs), temp_dir=a.temp_dir,
         keep_temp=a.keep_temp, dry_run=a.dry_run, safe=a.safe, ffmpeg=a.ffmpeg, ffprobe=a.ffprobe,
@@ -239,8 +254,10 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
         if info is None:
             log.warning("Пропуск %s: нет видеопотока", rel)
             continue
-        if info.duration < s.min_clip:
-            log.info("Пропуск %s: короче %.0f с (%.1f с)", rel, s.min_clip, info.duration)
+        trim = gopro_trim(p, s)
+        if info.duration - trim < s.min_clip:
+            extra = f" после обрезки GoPro на {trim:g} с" if trim else ""
+            log.info("Пропуск %s: короче %.0f с%s (%.1f с)", rel, s.min_clip, extra, info.duration - trim)
             continue
         fs = fs_date(p)
         meta, vote = check_utc(video_meta(info), fs, info.duration)
@@ -288,6 +305,9 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     log.info("Громкость:       основная %.2f%s", s.volume,
              f", музыка {s.music_volume:.2f} из {s.music_dir}" if s.music_dir else ", без музыки")
     log.info("Основание:       %s", base.source)
+    log.info("Фото:            %s", "на весь кадр с обрезкой" if s.photo_fit == "cover" else "целиком, с полями")
+    if s.gopro_trim > 0:
+        log.info("GoPro:           обрезка последних %g с", s.gopro_trim)
 
     log.info("")
     log.info("--- Хронология (%d файлов) ---", len(items))
@@ -295,6 +315,12 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
         log.info("%s  %-5s  %s  [%s]", it.when.strftime("%Y-%m-%d %H:%M:%S"),
                  "видео" if it.kind == "video" else "фото", it.rel, it.date_source)
 
+    caption_lines = []
+    if s.caption:
+        caption_lines = [ln for ln in (s.caption_name if s.caption_name is not None else event.name,
+                                       s.caption_date if s.caption_date is not None else event.caption_date())
+                         if ln]
+        log.info("Подпись:         %s (первые %g с)", " / ".join(caption_lines), s.caption_duration)
     segments = build_plan(items, base, s)
     total = sum(seg.duration for seg in segments)
     abytes = _bitrate(s.abitrate) * total / 8
@@ -323,12 +349,15 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     # рендер
     log.info("")
     log.info("--- Рендер (%d задач параллельно) ---", s.jobs)
-    tonemap_ok = has_filter(s.ffmpeg, "zscale")
-    title_lines = [event.name or s.workdir.name, event.title_date()]
-    title_lines = [ln for ln in title_lines if ln]
+    title_lines = [ln for ln in (event.name or s.workdir.name, event.title_date()) if ln]
+    ctx = RenderContext(has_filter(s.ffmpeg, "zscale"), title_lines)
+    if s.caption:
+        ctx.caption, ctx.caption_box = make_caption(base, s, caption_lines)
+        ctx.caption_path = tmp / "caption.png"
+        ctx.caption.save(ctx.caption_path)
     failed = []
     with ThreadPoolExecutor(max_workers=s.jobs) as pool:
-        futures = {pool.submit(render_segment, seg, base, s, tmp, tonemap_ok, title_lines): seg
+        futures = {pool.submit(render_segment, seg, base, s, tmp, ctx): seg
                    for seg in segments}
         done = 0
         for fut in as_completed(futures):

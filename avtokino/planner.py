@@ -8,6 +8,7 @@ from math import gcd
 from pathlib import Path
 
 from .config import DEFAULT_CRF, STANDARD_FPS, Settings
+from .naming import is_gopro
 from .probe import PhotoInfo, VideoInfo
 
 
@@ -45,11 +46,17 @@ class Segment:
     actions: list[str] = field(default_factory=list)
     audio_note: str = ""
     zoom_in: bool = True
+    start: float = 0.0               # расчётное начало сегмента в ролике
+    caption: bool = False            # на сегмент попадает подпись
     est_bytes: int = 0
     # заполняется при рендере
     video_path: Path | None = None
     audio_path: Path | None = None
     real_duration: float | None = None
+
+
+def gopro_trim(path: Path, s: Settings) -> float:
+    return s.gopro_trim if s.gopro_trim > 0 and is_gopro(path) else 0.0
 
 
 def fps_str(f: Fraction) -> str:
@@ -211,10 +218,13 @@ def build_plan(items: list[Item], base: Base, s: Settings) -> list[Segment]:
             p: PhotoInfo = it.info
             seg = Segment(idx, "photo", pd, it, zoom_in=(photo_n % 2 == 0))
             photo_n += 1
-            scale = min(base.width / p.width, base.height / p.height)
+            fit = max if s.photo_fit == "cover" else min
+            scale = fit(base.width / p.width, base.height / p.height)
             seg.actions.append(f"фото {p.width}x{p.height} → кадр {base.resolution} (масштаб ×{scale:.3f})")
             note = _aspect_note(p.width, p.height, base)
             if note:
+                if s.photo_fit == "cover":
+                    note = note.split(",")[0] + ", обрезка до 16:9 на весь кадр"
                 seg.actions.append(note)
             direction = "приближение" if seg.zoom_in else "отдаление"
             seg.actions.append(f"плавный зум {int(round((s.photo_zoom - 1) * 100))}% ({direction})")
@@ -223,14 +233,30 @@ def build_plan(items: list[Item], base: Base, s: Settings) -> list[Segment]:
         else:
             v: VideoInfo = it.info
             kind, reasons = plan_video(v, base, s)
-            seg = Segment(idx, kind, v.duration, it)
+            trim = gopro_trim(it.path, s)
+            seg = Segment(idx, kind, v.duration - trim, it)
             if kind == "copy":
                 seg.actions.append(f"видео без перекодировки ({v.vcodec} {v.resolution} {fps_str(v.fps)} к/с)")
             else:
                 seg.actions.append(f"перекодировка видео в {base.vcodec} {base.resolution} {fps_str(base.fps)} к/с")
                 seg.actions.extend(reasons)
+            if trim:
+                seg.actions.append(f"обрезка конца GoPro: −{trim:g} с ({v.duration:.2f} → {seg.duration:.2f} с)")
             seg.audio_note = audio_note(v, s)
         segments.append(seg)
+
+    start = 0.0
+    for seg in segments:
+        seg.start = start
+        start += seg.duration
+        if s.caption and seg.start < s.caption_duration:
+            seg.caption = True
+            shown = min(seg.duration, s.caption_duration - seg.start)
+            seg.actions.append(f"подпись в правом нижнем углу ({shown:.1f} с)")
+            if seg.kind == "copy":
+                seg.kind = "transcode"
+                seg.actions[0] = (f"перекодировка видео в {base.vcodec} {base.resolution} "
+                                  f"{fps_str(base.fps)} к/с (из-за подписи)")
 
     for seg in segments:
         if seg.kind == "copy":

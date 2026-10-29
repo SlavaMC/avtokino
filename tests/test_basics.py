@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from avtokino.dating import Evidence, estimate_offset, name_date, resolve
-from avtokino.naming import output_pattern, parse_dir_name
+from avtokino.naming import is_gopro, output_pattern, parse_dir_name
 from avtokino.planner import frame_16x9
 
 
@@ -20,6 +20,18 @@ class DirNameTest(unittest.TestCase):
         self.assertTrue(parse_dir_name("202406XX_Summer").month_only)
         self.assertTrue(parse_dir_name("202406_Summer").month_only)
         self.assertIsNone(parse_dir_name("Misc").start)
+
+    def test_caption_date(self):
+        self.assertEqual(parse_dir_name("202408XX_Sea").caption_date(), "Август 2024")
+        self.assertEqual(parse_dir_name("20240615_W").caption_date(), "15 июня 2024")
+        self.assertEqual(parse_dir_name("20240615-17_W").caption_date(), "15–17 июня 2024")
+        self.assertEqual(parse_dir_name("20140731-0803_W").caption_date(), "31 июля – 3 августа 2014")
+
+    def test_gopro(self):
+        for name in ("GOPR4739.MP4", "GP014739.MP4", "GH010123.MP4", "gx020456.mp4"):
+            self.assertTrue(is_gopro(Path(name)), name)
+        for name in ("GOPR47390.MP4", "DSC_0001.MP4", "00080.MTS"):
+            self.assertFalse(is_gopro(Path(name)), name)
 
     def test_output_pattern(self):
         r = output_pattern("20240615_Wedding")
