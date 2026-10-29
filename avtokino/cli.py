@@ -87,6 +87,8 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--photo-fit", choices=["contain", "cover"], default="contain",
                    help="фото: contain — целиком с чёрными полями, cover — на весь кадр с обрезкой "
                         "(вертикальные фото всегда целиком)")
+    g.add_argument("--date-tolerance", type=float, default=6.0, metavar="ЧАСЫ",
+                   help="запас вокруг периода из имени каталога; файлы за его пределами идут в конец (6)")
     g.add_argument("--tz", help="часовой пояс съёмки (Europe/Moscow или +03:00), если не определился сам")
     g.add_argument("--transition", choices=["none", "fade"], default="none",
                    help="переходы: fade = через чёрное (требует перекодировки всех клипов)")
@@ -124,7 +126,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         gopro_trim=a.gopro_trim, photo_fit=a.photo_fit,
         caption=a.caption or bool(a.caption_name or a.caption_date), caption_name=a.caption_name,
         caption_date=a.caption_date, caption_duration=a.caption_duration, caption_font=a.caption_font,
-        tz=a.tz, transition=a.transition, transition_duration=a.transition_duration,
+        tz=a.tz, date_tolerance=a.date_tolerance, transition=a.transition, transition_duration=a.transition_duration,
         title=a.title or bool(a.title_text), title_text=a.title_text,
         title_duration=a.title_duration, jobs=max(1, a.jobs), temp_dir=a.temp_dir,
         keep_temp=a.keep_temp, dry_run=a.dry_run, safe=a.safe, ffmpeg=a.ffmpeg, ffprobe=a.ffprobe,
@@ -295,7 +297,12 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     for p, kind, info, meta, name, fs in raw:
         dr = resolve(meta, name, fs, offset)
         items.append(Item(p, p.relative_to(s.workdir).as_posix(), kind, info, dr.when, dr.source))
-    items.sort(key=lambda it: (it.when, it.rel))
+    # Файлы с датой вне периода события идут в конец, между собой тоже по времени.
+    period = event.period(timedelta(hours=s.date_tolerance))
+    outside = set()
+    if period:
+        outside = {it.rel for it in items if not period[0] <= it.when < period[1]}
+    items.sort(key=lambda it: (it.rel in outside, it.when, it.rel))
 
     base = choose_base([it.info for it in items if it.kind == "video"], s)
     log.info("")
@@ -317,7 +324,15 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
 
     log.info("")
     log.info("--- Хронология (%d файлов) ---", len(items))
+    if period:
+        log.info("Период события: %s – %s (с запасом %g ч)", period[0].strftime("%Y-%m-%d %H:%M"),
+                 period[1].strftime("%Y-%m-%d %H:%M"), s.date_tolerance)
+    else:
+        log.info("Период события в имени каталога не указан, все файлы идут по времени")
+    first_outside = next((it for it in items if it.rel in outside), None)
     for it in items:
+        if it is first_outside:
+            log.info("--- Вне периода события, в конец ролика (%d) ---", len(outside))
         log.info("%s  %-5s  %s  [%s]", it.when.strftime("%Y-%m-%d %H:%M:%S"),
                  "видео" if it.kind == "video" else "фото", it.rel, it.date_source)
 

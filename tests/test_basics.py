@@ -27,6 +27,13 @@ class DirNameTest(unittest.TestCase):
         self.assertEqual(parse_dir_name("20240615-17_W").caption_date(), "15–17 июня 2024")
         self.assertEqual(parse_dir_name("20140731-0803_W").caption_date(), "31 июля – 3 августа 2014")
 
+    def test_period(self):
+        b, e = parse_dir_name("20140731-0803_W").period(timedelta(hours=6))
+        self.assertEqual((b, e), (datetime(2014, 7, 30, 18), datetime(2014, 8, 4, 6)))
+        b, e = parse_dir_name("202412XX_W").period()
+        self.assertEqual((b, e), (datetime(2024, 12, 1), datetime(2025, 1, 1)))
+        self.assertIsNone(parse_dir_name("Misc").period())
+
     def test_gopro(self):
         for name in ("GOPR4739.MP4", "GP014739.MP4", "GH010123.MP4", "gx020456.mp4"):
             self.assertTrue(is_gopro(Path(name)), name)

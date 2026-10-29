@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # YYYYMM, YYYYMMDD, YYYYMMXX, YYYYMMDD-DD, YYYYMMDD-MMDD, затем _Название
@@ -40,6 +40,17 @@ class EventInfo:
                 return f"{self.start:%d}–{self.end:%d.%m.%Y}"
             return f"{self.start:%d.%m.%Y} – {self.end:%d.%m.%Y}"
         return f"{self.start:%d.%m.%Y}"
+
+    def period(self, tolerance: timedelta = timedelta(0)) -> tuple[datetime, datetime] | None:
+        """Границы события [начало, конец) с запасом; для «только месяц» — весь месяц."""
+        if self.start is None:
+            return None
+        begin = datetime.combine(self.start, datetime.min.time())
+        if self.month_only:
+            nxt = date(self.start.year + self.start.month // 12, self.start.month % 12 + 1, 1)
+        else:
+            nxt = (self.end or self.start) + timedelta(days=1)
+        return begin - tolerance, datetime.combine(nxt, datetime.min.time()) + tolerance
 
     def caption_date(self) -> str:
         """Дата для подписи: «Август 2014», «15 июня 2024», «31 июля – 3 августа 2014»."""

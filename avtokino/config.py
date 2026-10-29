@@ -51,6 +51,7 @@ class Settings:
     caption_duration: float = 10.0
     caption_font: str | None = None
     tz: str | None = None
+    date_tolerance: float = 6.0          # часов запаса вокруг периода события
     transition: str = "none"
     transition_duration: float = 0.5
     title: bool = False
