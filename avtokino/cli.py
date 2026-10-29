@@ -17,7 +17,7 @@ from pathlib import Path
 from . import __version__
 from .assemble import build_music, concat_audio, mix_audio, mux
 from .config import IGNORED_NAMES, PHOTO_EXTS, VIDEO_EXTS, Settings
-from .dating import check_utc, estimate_offset, fs_date, name_date, photo_meta, resolve, video_meta
+from .dating import check_utc, fmt_delta, parse_time_fix, estimate_offset, fs_date, name_date, photo_meta, resolve, video_meta
 from .naming import choose_output, output_pattern, parse_dir_name
 from .planner import Item, build_plan, choose_base, fps_str, gopro_trim
 from .probe import HEIF_SUPPORTED, probe_photo, probe_video
@@ -44,6 +44,13 @@ def _resolution(value: str) -> tuple[int, int]:
     if w * 9 != h * 16:
         raise argparse.ArgumentTypeError("разрешение должно быть 16:9")
     return w, h
+
+
+def _time_fix(value: str):
+    try:
+        return parse_time_fix(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
 
 
 def _fps(value: str) -> Fraction:
@@ -89,6 +96,10 @@ def parse_args(argv: list[str] | None = None) -> Settings:
                         "(вертикальные фото всегда целиком)")
     g.add_argument("--date-tolerance", type=float, default=6.0, metavar="ЧАСЫ",
                    help="запас вокруг периода из имени каталога; файлы за его пределами идут в конец (6)")
+    g.add_argument("--time-fix", action="append", type=_time_fix, metavar="'БЫЛО -> СТАЛО'",
+                   help="поправка сбитых часов: \"2016-01-04 23:02:42 -> 2025-06-20 09:48:00\"; "
+                        "применяется к файлам вне периода события, если с ней они в него попадают; "
+                        "можно указать несколько, пробуются по порядку")
     g.add_argument("--tz", help="часовой пояс съёмки (Europe/Moscow или +03:00), если не определился сам")
     g.add_argument("--transition", choices=["none", "fade"], default="none",
                    help="переходы: fade = через чёрное (требует перекодировки всех клипов)")
@@ -126,7 +137,8 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         gopro_trim=a.gopro_trim, photo_fit=a.photo_fit,
         caption=a.caption or bool(a.caption_name or a.caption_date), caption_name=a.caption_name,
         caption_date=a.caption_date, caption_duration=a.caption_duration, caption_font=a.caption_font,
-        tz=a.tz, date_tolerance=a.date_tolerance, transition=a.transition, transition_duration=a.transition_duration,
+        tz=a.tz, date_tolerance=a.date_tolerance, time_fixes=a.time_fix or [],
+        transition=a.transition, transition_duration=a.transition_duration,
         title=a.title or bool(a.title_text), title_text=a.title_text,
         title_duration=a.title_duration, jobs=max(1, a.jobs), temp_dir=a.temp_dir,
         keep_temp=a.keep_temp, dry_run=a.dry_run, safe=a.safe, ffmpeg=a.ffmpeg, ffprobe=a.ffprobe,
@@ -301,7 +313,23 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     period = event.period(timedelta(hours=s.date_tolerance))
     outside = set()
     if period:
-        outside = {it.rel for it in items if not period[0] <= it.when < period[1]}
+        for k, delta in enumerate(s.time_fixes or [], 1):
+            log.info("Поправка часов №%d: %s", k, fmt_delta(delta))
+        for it in items:
+            if period[0] <= it.when < period[1]:
+                continue
+            for k, delta in enumerate(s.time_fixes or [], 1):
+                fixed = it.when + delta
+                if period[0] <= fixed < period[1]:
+                    log.info("  %s: %s → %s (поправка №%d)", it.rel, it.when.strftime("%Y-%m-%d %H:%M:%S"),
+                             fixed.strftime("%Y-%m-%d %H:%M:%S"), k)
+                    it.when = fixed
+                    it.date_source += f", исправлено поправкой №{k}"
+                    break
+            else:
+                outside.add(it.rel)
+    elif s.time_fixes:
+        log.warning("Поправки часов не применены: в имени каталога нет периода события")
     items.sort(key=lambda it: (it.rel in outside, it.when, it.rel))
 
     base = choose_base([it.info for it in items if it.kind == "video"], s)

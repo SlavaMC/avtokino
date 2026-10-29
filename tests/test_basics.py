@@ -2,7 +2,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from avtokino.dating import Evidence, estimate_offset, name_date, resolve
+from avtokino.dating import Evidence, estimate_offset, name_date, parse_time_fix, resolve
 from avtokino.naming import is_gopro, output_pattern, parse_dir_name
 from avtokino.planner import frame_16x9
 
@@ -54,6 +54,13 @@ class DatingTest(unittest.TestCase):
         ev = name_date(Path("IMG-20240615-WA0001.jpg"))
         self.assertFalse(ev.has_time)
         self.assertIsNone(name_date(Path("DSC_0001.jpg")))
+
+    def test_time_fix(self):
+        d = parse_time_fix("2016-01-04 23:02:42 -> 2025-06-20 09:48:00")
+        self.assertEqual(datetime(2016, 1, 4, 23, 2, 42) + d, datetime(2025, 6, 20, 9, 48))
+        self.assertEqual(parse_time_fix("2020-01-01 10:00->2019-12-31 10:00"), timedelta(days=-1))
+        with self.assertRaises(ValueError):
+            parse_time_fix("вчера -> сегодня")
 
     def test_offset_from_pair(self):
         meta = Evidence(datetime(2024, 6, 15, 9, 34, 50, tzinfo=timezone.utc), "utc", "ct")

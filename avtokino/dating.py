@@ -203,6 +203,28 @@ def fs_date(path: Path) -> Evidence:
     return Evidence(datetime.fromtimestamp(ts, tz=timezone.utc), "utc", label)
 
 
+# --- коррекция сбитых часов -------------------------------------------------
+
+_FIX_POINT = r"(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?"
+_FIX_RE = re.compile(rf"^\s*{_FIX_POINT}\s*->\s*{_FIX_POINT}\s*$")
+
+
+def parse_time_fix(value: str) -> timedelta:
+    """«2016-01-04 23:02:42 -> 2025-06-20 09:48:00»: что показывали часы устройства и что было на самом деле."""
+    m = _FIX_RE.match(value)
+    if not m:
+        raise ValueError(f"ожидается «ГГГГ-ММ-ДД ЧЧ:ММ[:СС] -> ГГГГ-ММ-ДД ЧЧ:ММ[:СС]», получено: {value}")
+    g = [int(x) if x else 0 for x in m.groups()]
+    return datetime(*g[6:]) - datetime(*g[:6])
+
+
+def fmt_delta(delta: timedelta) -> str:
+    sign = "+" if delta >= timedelta(0) else "−"
+    d = abs(delta)
+    hh, rest = divmod(d.seconds, 3600)
+    return f"{sign}{d.days} дн {hh:02d}:{rest // 60:02d}:{rest % 60:02d}"
+
+
 # --- часовой пояс события ---------------------------------------------------
 
 def _round_offset(delta: timedelta) -> timedelta | None:

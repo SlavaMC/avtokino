@@ -52,6 +52,7 @@ class Settings:
     caption_font: str | None = None
     tz: str | None = None
     date_tolerance: float = 6.0          # часов запаса вокруг периода события
+    time_fixes: list | None = None       # поправки сбитых часов (timedelta), пробуются по порядку
     transition: str = "none"
     transition_duration: float = 0.5
     title: bool = False
