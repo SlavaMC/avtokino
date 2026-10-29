@@ -56,6 +56,14 @@ class Settings:
     title: bool = False
     title_duration: float = 4.0
     title_text: list[str] | None = None  # свои строки титра вместо названия и даты из каталога
+    jobs: int = 2
+    temp_dir: Path | None = None
+    keep_temp: bool = False
+    dry_run: bool = False
+    safe: bool = False
+    ffmpeg: str = "ffmpeg"
+    ffprobe: str = "ffprobe"
+    verbose: bool = False
 
     @property
     def caption_start(self) -> float:
@@ -65,11 +73,3 @@ class Settings:
     @property
     def caption_end(self) -> float:
         return self.caption_start + self.caption_duration
-    jobs: int = 2
-    temp_dir: Path | None = None
-    keep_temp: bool = False
-    dry_run: bool = False
-    safe: bool = False
-    ffmpeg: str = "ffmpeg"
-    ffprobe: str = "ffprobe"
-    verbose: bool = False

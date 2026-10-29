@@ -59,6 +59,11 @@ def gopro_trim(path: Path, s: Settings) -> float:
     return s.gopro_trim if s.gopro_trim > 0 and is_gopro(path) else 0.0
 
 
+def photo_cover(p: PhotoInfo, s: Settings) -> bool:
+    """Режим cover только для горизонтальных фото: вертикальные всегда целиком, с полями."""
+    return s.photo_fit == "cover" and p.width >= p.height
+
+
 def fps_str(f: Fraction) -> str:
     return f"{float(f):.3f}".rstrip("0").rstrip(".") if f else "?"
 
@@ -218,12 +223,13 @@ def build_plan(items: list[Item], base: Base, s: Settings) -> list[Segment]:
             p: PhotoInfo = it.info
             seg = Segment(idx, "photo", pd, it, zoom_in=(photo_n % 2 == 0))
             photo_n += 1
-            fit = max if s.photo_fit == "cover" else min
+            cover = photo_cover(p, s)
+            fit = max if cover else min
             scale = fit(base.width / p.width, base.height / p.height)
             seg.actions.append(f"фото {p.width}x{p.height} → кадр {base.resolution} (масштаб ×{scale:.3f})")
             note = _aspect_note(p.width, p.height, base)
             if note:
-                if s.photo_fit == "cover":
+                if cover:
                     note = note.split(",")[0] + ", обрезка до 16:9 на весь кадр"
                 seg.actions.append(note)
             direction = "приближение" if seg.zoom_in else "отдаление"

@@ -85,7 +85,8 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--gopro-trim", type=float, nargs="?", const=3.0, default=0.0, metavar="СЕК",
                    help="отрезать конец у роликов GoPro (GOPR*, GP*, GH*, GX*); без числа — 3 с")
     g.add_argument("--photo-fit", choices=["contain", "cover"], default="contain",
-                   help="фото: contain — целиком с чёрными полями, cover — на весь кадр с обрезкой")
+                   help="фото: contain — целиком с чёрными полями, cover — на весь кадр с обрезкой "
+                        "(вертикальные фото всегда целиком)")
     g.add_argument("--tz", help="часовой пояс съёмки (Europe/Moscow или +03:00), если не определился сам")
     g.add_argument("--transition", choices=["none", "fade"], default="none",
                    help="переходы: fade = через чёрное (требует перекодировки всех клипов)")
@@ -309,7 +310,8 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     log.info("Громкость:       основная %.2f%s", s.volume,
              f", музыка {s.music_volume:.2f} из {s.music_dir}" if s.music_dir else ", без музыки")
     log.info("Основание:       %s", base.source)
-    log.info("Фото:            %s", "на весь кадр с обрезкой" if s.photo_fit == "cover" else "целиком, с полями")
+    log.info("Фото:            %s", "горизонтальные на весь кадр с обрезкой, вертикальные целиком"
+             if s.photo_fit == "cover" else "целиком, с полями")
     if s.gopro_trim > 0:
         log.info("GoPro:           обрезка последних %g с", s.gopro_trim)
 

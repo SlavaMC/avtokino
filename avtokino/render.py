@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import ENCODERS, Settings
-from .planner import Base, Segment
+from .planner import Base, Segment, photo_cover
 from .probe import load_photo, probe_duration
 
 log = logging.getLogger("avtokino")
@@ -191,7 +191,7 @@ def _encode_frames(frames, n: int, base: Base, s: Settings, duration: float, out
 
 def render_photo(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderContext) -> None:
     n = max(1, round(seg.duration * float(base.fps)))
-    prepared = _prepare_photo(load_photo(seg.item.path), base, s.photo_zoom, s.photo_fit == "cover")
+    prepared = _prepare_photo(load_photo(seg.item.path), base, s.photo_zoom, photo_cover(seg.item.info, s))
     frames = _with_caption(_frames(prepared, base, s.photo_zoom, n, seg.zoom_in), seg, base, s, ctx)
     _encode_frames(frames, n, base, s, seg.duration, out)
 
