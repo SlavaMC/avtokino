@@ -249,9 +249,9 @@ def build_plan(items: list[Item], base: Base, s: Settings) -> list[Segment]:
     for seg in segments:
         seg.start = start
         start += seg.duration
-        if s.caption and seg.start < s.caption_duration:
+        shown = min(seg.start + seg.duration, s.caption_end) - max(seg.start, s.caption_start)
+        if s.caption and shown > 0.01:
             seg.caption = True
-            shown = min(seg.duration, s.caption_duration - seg.start)
             seg.actions.append(f"подпись в правом нижнем углу ({shown:.1f} с)")
             if seg.kind == "copy":
                 seg.kind = "transcode"

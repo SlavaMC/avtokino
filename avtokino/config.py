@@ -55,6 +55,16 @@ class Settings:
     transition_duration: float = 0.5
     title: bool = False
     title_duration: float = 4.0
+    title_text: list[str] | None = None  # свои строки титра вместо названия и даты из каталога
+
+    @property
+    def caption_start(self) -> float:
+        """Подпись появляется после титра, если он есть."""
+        return self.title_duration if self.title else 0.0
+
+    @property
+    def caption_end(self) -> float:
+        return self.caption_start + self.caption_duration
     jobs: int = 2
     temp_dir: Path | None = None
     keep_temp: bool = False

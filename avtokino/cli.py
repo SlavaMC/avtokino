@@ -91,7 +91,10 @@ def parse_args(argv: list[str] | None = None) -> Settings:
                    help="переходы: fade = через чёрное (требует перекодировки всех клипов)")
     g.add_argument("--transition-duration", type=float, default=0.5, help="длительность перехода, с")
     g.add_argument("--title", action="store_true", help="титр с названием и датой события в начале")
-    g.add_argument("--title-duration", type=float, default=4.0, help="длительность титра, с")
+    g.add_argument("--title-text", action="append", metavar="СТРОКА",
+                   help="свой текст титра; каждая --title-text — отдельная строка, первая крупнее "
+                        "(включает титр)")
+    g.add_argument("--title-duration", type=float, default=4.0, metavar="СЕК", help="длительность титра, с (4)")
     g.add_argument("--caption", action="store_true",
                    help="подпись (название и дата) в правом нижнем углу в начале ролика")
     g.add_argument("--caption-name", metavar="ТЕКСТ", help="первая строка подписи (по умолчанию из имени каталога)")
@@ -120,7 +123,8 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         gopro_trim=a.gopro_trim, photo_fit=a.photo_fit,
         caption=a.caption or bool(a.caption_name or a.caption_date), caption_name=a.caption_name,
         caption_date=a.caption_date, caption_duration=a.caption_duration, caption_font=a.caption_font,
-        tz=a.tz, transition=a.transition, transition_duration=a.transition_duration, title=a.title,
+        tz=a.tz, transition=a.transition, transition_duration=a.transition_duration,
+        title=a.title or bool(a.title_text), title_text=a.title_text,
         title_duration=a.title_duration, jobs=max(1, a.jobs), temp_dir=a.temp_dir,
         keep_temp=a.keep_temp, dry_run=a.dry_run, safe=a.safe, ffmpeg=a.ffmpeg, ffprobe=a.ffprobe,
         verbose=a.verbose,
@@ -320,7 +324,11 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
         caption_lines = [ln for ln in (s.caption_name if s.caption_name is not None else event.name,
                                        s.caption_date if s.caption_date is not None else event.caption_date())
                          if ln]
-        log.info("Подпись:         %s (первые %g с)", " / ".join(caption_lines), s.caption_duration)
+        log.info("Подпись:         %s (%g с, с %g с ролика%s)", " / ".join(caption_lines), s.caption_duration,
+                 s.caption_start, ", после титра" if s.title else "")
+    if s.title:
+        log.info("Титр:            %s (%g с)", " / ".join(s.title_text or [event.name or s.workdir.name,
+                                                                         event.title_date()]), s.title_duration)
     segments = build_plan(items, base, s)
     total = sum(seg.duration for seg in segments)
     abytes = _bitrate(s.abitrate) * total / 8
@@ -349,7 +357,7 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     # рендер
     log.info("")
     log.info("--- Рендер (%d задач параллельно) ---", s.jobs)
-    title_lines = [ln for ln in (event.name or s.workdir.name, event.title_date()) if ln]
+    title_lines = s.title_text or [ln for ln in (event.name or s.workdir.name, event.title_date()) if ln]
     ctx = RenderContext(has_filter(s.ffmpeg, "zscale"), title_lines)
     if s.caption:
         ctx.caption, ctx.caption_box = make_caption(base, s, caption_lines)

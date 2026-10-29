@@ -73,16 +73,20 @@ def _fade(duration: float, s: Settings, audio: bool = False) -> str:
     return f",{name}=t=in:st=0:d={t:.3f},{name}=t=out:st={duration - t:.3f}:d={t:.3f}"
 
 
-def _caption_fades(seg: Segment, s: Settings) -> tuple[float, str]:
-    """Сколько секунд подпись видна в сегменте и фильтры её плавного появления/исчезновения."""
-    shown = min(seg.duration, s.caption_duration - seg.start)
+def _caption_timing(seg: Segment, s: Settings) -> tuple[float, float, str]:
+    """Когда (от начала сегмента) появляется подпись, сколько секунд она видна
+    и фильтры её плавного появления/исчезновения."""
+    appear = max(0.0, s.caption_start - seg.start)
+    shown = min(seg.start + seg.duration, s.caption_end) - (seg.start + appear)
     fades = []
-    if seg.start == 0:
+    if seg.start <= s.caption_start:
         fades.append(f"fade=t=in:st=0:d={CAPTION_FADE}:alpha=1")
-    out_st = s.caption_duration - CAPTION_FADE - seg.start
+    out_st = s.caption_end - CAPTION_FADE - (seg.start + appear)
     if out_st < shown:
         fades.append(f"fade=t=out:st={max(0.0, out_st):.3f}:d={min(CAPTION_FADE, shown):.3f}:alpha=1")
-    return shown, ",".join(fades)
+    if appear > 0:
+        fades.append(f"setpts=PTS+{appear:.3f}/TB")
+    return appear, shown, ",".join(fades)
 
 
 def render_video(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderContext) -> None:
@@ -111,7 +115,7 @@ def render_video(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderCo
         ]
         vf = ",".join(chain) + _fade(seg.duration, s)
         if seg.caption and ctx.caption_path:
-            shown, fades = _caption_fades(seg, s)
+            _, shown, fades = _caption_timing(seg, s)
             fps = f"{base.fps.numerator}/{base.fps.denominator}"
             cmd += ["-loop", "1", "-framerate", fps, "-t", f"{shown:.3f}", "-i", str(ctx.caption_path)]
             cap = "[1:v]format=rgba" + (f",{fades}" if fades else "") + "[cap]"
@@ -159,7 +163,7 @@ def _with_caption(frames, seg: Segment, base: Base, s: Settings, ctx: RenderCont
     for i, frame in enumerate(frames):
         if cap is not None:
             t = seg.start + i / fps
-            k = min(1.0, t / CAPTION_FADE, (s.caption_duration - t) / CAPTION_FADE)
+            k = min(1.0, (t - s.caption_start) / CAPTION_FADE, (s.caption_end - t) / CAPTION_FADE)
             if k > 0:
                 mask = alpha if k >= 1 else alpha.point(lambda a, k=k: int(a * k))
                 frame.paste(cap, box[:2], mask)
@@ -225,8 +229,8 @@ def render_title(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderCo
     lines = ctx.title_lines
     img = Image.new("RGB", (base.width, base.height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
-    sizes = [base.height // 12, base.height // 20]
-    fonts = [_font(sz) for sz in sizes]
+    # первая строка крупно, остальные мельче
+    fonts = [_font(base.height // 12 if i == 0 else base.height // 20) for i in range(len(lines))]
     heights = [draw.textbbox((0, 0), ln, font=f)[3] for ln, f in zip(lines, fonts)]
     y = (base.height - sum(heights) - base.height // 30 * (len(lines) - 1)) / 2
     for ln, f, h in zip(lines, fonts, heights):
