@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import logging
 import os
 import re
@@ -87,6 +88,9 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--photo-burst-threshold", type=int, default=5,
                    help="серия = больше стольких фото подряд (5)")
     g.add_argument("--photo-zoom", type=float, default=1.05, help="зум фото за кадр (1.05 = 5%%)")
+    g.add_argument("--exclude", action="append", metavar="КАТАЛОГ",
+                   help="не обрабатывать каталог: имя на любом уровне (Черновики), путь от рабочего "
+                        "каталога (Mobile/Screenshots) или маска (*_old); можно указать несколько раз")
     g.add_argument("--min-clip", type=float, default=5.0,
                    help="пропускать видео короче, с (5); для GoPro считается после обрезки")
     g.add_argument("--gopro-trim", type=float, nargs="?", const=3.0, default=0.0, metavar="СЕК",
@@ -133,7 +137,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         music_dir=a.music.resolve() if a.music else None, music_volume=a.music_volume,
         music_crossfade=a.music_crossfade, music_fadeout=a.music_fadeout, ducking=not a.no_ducking,
         photo_duration=a.photo_duration, photo_burst_duration=a.photo_burst_duration,
-        photo_burst_threshold=a.photo_burst_threshold, photo_zoom=a.photo_zoom, min_clip=a.min_clip,
+        photo_burst_threshold=a.photo_burst_threshold, photo_zoom=a.photo_zoom, min_clip=a.min_clip, exclude=a.exclude or [],
         gopro_trim=a.gopro_trim, photo_fit=a.photo_fit,
         caption=a.caption or bool(a.caption_name or a.caption_date), caption_name=a.caption_name,
         caption_date=a.caption_date, caption_duration=a.caption_duration, caption_font=a.caption_font,
@@ -192,12 +196,32 @@ def _fmt_dur(sec: float) -> str:
     return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
 
 
+def is_excluded(rel: str, patterns: list[str]) -> bool:
+    """rel — путь каталога от рабочего, через «/». Шаблон без «/» сравнивается с именем каталога,
+    с «/» — с путём целиком; регистр не важен, допускаются маски * и ?."""
+    rel = rel.casefold()
+    name = rel.rsplit("/", 1)[-1]
+    for pat in patterns:
+        pat = pat.replace("\\", "/").strip("/").casefold()
+        if fnmatch.fnmatchcase(rel if "/" in pat else name, pat):
+            return True
+    return False
+
+
 def scan(s: Settings, out_re: re.Pattern, skip_dirs: list[Path]) -> tuple[list[Path], list[Path]]:
     videos, photos = [], []
     for root, dirs, files in os.walk(s.workdir):
         rootp = Path(root)
-        dirs[:] = sorted(d for d in dirs if not d.startswith(".")
-                         and not any((rootp / d).resolve() == sd for sd in skip_dirs))
+        kept = []
+        for d in sorted(dirs):
+            if d.startswith(".") or any((rootp / d).resolve() == sd for sd in skip_dirs):
+                continue
+            rel = (rootp / d).relative_to(s.workdir).as_posix()
+            if s.exclude and is_excluded(rel, s.exclude):
+                log.info("Пропуск каталога (--exclude): %s", rel)
+                continue
+            kept.append(d)
+        dirs[:] = kept
         for f in sorted(files):
             p = rootp / f
             ext = p.suffix.lower()

@@ -43,6 +43,7 @@ class Settings:
     photo_burst_threshold: int = 5
     photo_zoom: float = 1.05
     min_clip: float = 5.0
+    exclude: list[str] | None = None     # каталоги, которые не обрабатываются (имя, путь или маска)
     gopro_trim: float = 0.0              # сколько секунд отрезать в конце роликов GoPro
     photo_fit: str = "contain"           # contain = целиком с полями, cover = на весь кадр с обрезкой
     caption: bool = False

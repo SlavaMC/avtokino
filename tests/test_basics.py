@@ -71,6 +71,17 @@ class DatingTest(unittest.TestCase):
         self.assertEqual(r.when, datetime(2024, 6, 15, 12, 34, 50))
 
 
+class ExcludeTest(unittest.TestCase):
+    def test_exclude(self):
+        from avtokino.cli import is_excluded
+        self.assertTrue(is_excluded("Mobile/Screenshots", ["screenshots"]))
+        self.assertTrue(is_excluded("Mobile/Screenshots", ["Mobile/Screenshots"]))
+        self.assertTrue(is_excluded("Mobile/Screenshots", ["Mobile\\Screenshots"]))
+        self.assertTrue(is_excluded("Old_1", ["*_1"]))
+        self.assertFalse(is_excluded("Mobile", ["Mobile/Screenshots"]))
+        self.assertFalse(is_excluded("GoPro8/Screenshots", ["Mobile/Screenshots"]))
+
+
 class FrameTest(unittest.TestCase):
     def test_frame(self):
         self.assertEqual(frame_16x9(1920, 1080), (1920, 1080))
