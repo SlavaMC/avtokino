@@ -1,7 +1,8 @@
 """Служебные команды для отдельных файлов: python -m avtokino.tools <команда> ...
 
 Команды:
-  trim   вырезать кусок видео без перекодировки
+  trim        вырезать кусок видео без перекодировки
+  timelapse   собрать ролик из последовательности фото, одно фото = один кадр
 """
 from __future__ import annotations
 
@@ -114,6 +115,147 @@ def trim(args) -> int:
     return 0
 
 
+# --- timelapse ----------------------------------------------------------------
+
+def _natural_key(p: Path):
+    """IMG_9.jpg раньше IMG_10.jpg."""
+    import re
+    return [int(x) if x.isdigit() else x.casefold() for x in re.split(r"(\d+)", p.name)]
+
+
+def _photo_time_utc(path: Path):
+    """Время съёмки фото в UTC (EXIF со смещением, иначе EXIF как местное время этого компьютера)."""
+    from datetime import timezone
+    from .dating import photo_meta
+    from .probe import probe_photo
+    try:
+        ev = photo_meta(probe_photo(path))
+    except Exception:  # noqa: BLE001
+        ev = None
+    if ev is None:
+        return None
+    dt = ev.value if ev.value.tzinfo else ev.value.astimezone()  # без пояса: пояс этого компьютера
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_resolution(value: str) -> tuple[int, int]:
+    import re
+    m = re.fullmatch(r"\s*(\d+)\s*[xх×:]\s*(\d+)\s*", value, re.IGNORECASE)
+    if not m:
+        raise argparse.ArgumentTypeError(f"ожидается ШИРИНАxВЫСОТА, например 1920x1080: {value}")
+    return int(m[1]), int(m[2])
+
+
+def timelapse(args) -> int:
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+
+    from PIL import Image
+
+    from .config import PHOTO_EXTS
+    from .naming import choose_output
+    from .probe import load_photo
+
+    folder = Path(args.dir).resolve()
+    if not folder.is_dir():
+        print(f"Каталог не найден: {folder}", file=sys.stderr)
+        return 2
+    photos = sorted((p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in PHOTO_EXTS),
+                    key=_natural_key)
+    if not photos:
+        print(f"В каталоге нет фотографий: {folder}", file=sys.stderr)
+        return 2
+
+    first = load_photo(photos[0])
+    w, h = args.resolution or first.size
+    w, h = w // 2 * 2, h // 2 * 2  # для yuv420p нужны чётные размеры
+    out = choose_output(folder, ".mp4")
+    n = len(photos)
+    print(f"Фото: {n}, первое {photos[0].name}, последнее {photos[-1].name}")
+    print(f"Ролик: {out.name}, {w}x{h}, {args.fps:g} кадр/с, {n / args.fps:.1f} с, до {args.max_bitrate:g} Мбит/с")
+    if w * h > 4096 * 2304:
+        print("  внимание: кадр больше 4K, не все плееры такое воспроизведут; уменьшить: --resolution 3840x2160")
+
+    def frame(path: Path) -> bytes:
+        try:
+            img = load_photo(path)
+        except Exception as e:  # noqa: BLE001
+            print(f"  пропуск {path.name}: {e}; вместо него повторён предыдущий кадр", file=sys.stderr)
+            return b""
+        if img.size != (w, h):
+            # Вписываем целиком, лишнее место — чёрные поля.
+            k = min(w / img.width, h / img.height)
+            size = (max(1, round(img.width * k)), max(1, round(img.height * k)))
+            img = img.resize(size, Image.LANCZOS)
+            if size != (w, h):
+                canvas = Image.new("RGB", (w, h))
+                canvas.paste(img, ((w - size[0]) // 2, (h - size[1]) // 2))
+                img = canvas
+        return img.tobytes()
+
+    rate = int(args.max_bitrate * 1_000_000)
+    codec = {"h264": "libx264", "hevc": "libx265"}[args.vcodec]
+    cmd = [args.ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-framerate", f"{args.fps:g}", "-i", "-",
+           "-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
+           "-c:v", codec, "-preset", args.preset, "-crf", str(args.crf),
+           "-maxrate", str(rate), "-bufsize", str(rate * 2),
+           "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+    cmd += ["-tag:v", "hvc1"] if args.vcodec == "hevc" else []
+    start = _photo_time_utc(photos[0])
+    if start:
+        cmd += ["-metadata", "creation_time=" + start.strftime("%Y-%m-%dT%H:%M:%S.000000Z")]
+    cmd += ["-an", "-movflags", "+faststart", str(out)]
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    jobs = max(1, os.cpu_count() or 2)
+    prev = b""
+    try:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            window: deque = deque()
+            it = iter(photos)
+            for p in it:  # заранее читаем несколько фото, но не больше, чтобы не занять всю память
+                window.append(pool.submit(frame, p))
+                if len(window) >= jobs * 2:
+                    break
+            done = 0
+            while window:
+                data = window.popleft().result()
+                nxt = next(it, None)
+                if nxt is not None:
+                    window.append(pool.submit(frame, nxt))
+                data = data or prev
+                if data:
+                    proc.stdin.write(data)
+                    prev = data
+                done += 1
+                if done % 100 == 0 or done == n:
+                    print(f"\r  кадров: {done}/{n}", end="", flush=True)
+        print()
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        out.unlink(missing_ok=True)
+        print("\nПрервано", file=sys.stderr)
+        return 130
+    err = proc.stderr.read().decode("utf-8", errors="replace").strip()
+    if proc.wait() != 0:
+        out.unlink(missing_ok=True)
+        print(f"Ошибка ffmpeg: {err}", file=sys.stderr)
+        return 1
+    if start:
+        # Дата файла = время окончания съёмки (так avtokino сверяет её с creation_time).
+        end = start + timedelta(seconds=n / args.fps)
+        os.utime(out, (end.timestamp(), end.timestamp()))
+    size = out.stat().st_size
+    print(f"Готово: {out.name}, {probe_duration(args.ffprobe, out):.1f} с, {size / 1_048_576:.1f} МБ")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="avtokino.tools", description="Служебные команды для файлов.")
     p.add_argument("--ffmpeg", default="ffmpeg", help="путь к ffmpeg")
@@ -130,6 +272,22 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--cut-end", type=float, metavar="СЕК", help="сколько секунд отрезать от конца")
     t.add_argument("--force", action="store_true", help="перезаписать существующий результат")
     t.set_defaults(func=trim)
+
+    tl = sub.add_parser("timelapse", help="собрать ролик из фото, одно фото = один кадр",
+                        description="Собирает ролик из всех фото каталога (порядок по имени файла, "
+                                    "IMG_9 раньше IMG_10), одно фото = один кадр. Ролик <каталог>.mp4 "
+                                    "сохраняется в том же каталоге (если есть, то <каталог>_v2.mp4 и т. д.).")
+    tl.add_argument("dir", help="каталог с фотографиями")
+    tl.add_argument("--fps", type=float, default=15.0, help="частота кадров (15)")
+    tl.add_argument("--resolution", type=_parse_resolution, metavar="ШxВ",
+                    help="разрешение, например 1920x1080 (по умолчанию как у первой фотографии); "
+                         "фото другого формата вписываются с чёрными полями")
+    tl.add_argument("--max-bitrate", type=float, default=15.0, metavar="МБИТ",
+                    help="максимальный видеопоток, Мбит/с (15)")
+    tl.add_argument("--crf", type=int, default=20, help="качество x264/x265, меньше = лучше (20)")
+    tl.add_argument("--preset", default="medium", help="пресет кодировщика (medium); быстрее: veryfast")
+    tl.add_argument("--vcodec", choices=["h264", "hevc"], default="h264", help="видеокодек (h264)")
+    tl.set_defaults(func=timelapse)
 
     a = p.parse_args(argv)
     if a.command == "trim" and (a.start is not None or a.end is not None) and (a.cut_start or a.cut_end):
