@@ -110,6 +110,8 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--exclude", action="append", metavar="КАТАЛОГ",
                    help="не обрабатывать каталог: имя на любом уровне (Черновики), путь от рабочего "
                         "каталога (Mobile/Screenshots) или маска (*_old); можно указать несколько раз")
+    g.add_argument("--long-video", type=float, default=60.0, metavar="СЕК",
+                   help="в логе отдельно перечислить видео длиннее СЕК секунд (по умолчанию 60, 0 = не выводить)")
     g.add_argument("--min-clip", type=float, default=5.0,
                    help="пропускать видео короче, с (5); для GoPro считается после обрезки")
     g.add_argument("--gopro-trim", type=float, nargs="?", const=3.0, default=0.0, metavar="СЕК",
@@ -160,7 +162,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         music_dir=a.music.resolve() if a.music else None, music_volume=a.music_volume,
         music_crossfade=a.music_crossfade, music_fadeout=a.music_fadeout, ducking=not a.no_ducking,
         photo_duration=a.photo_duration, photo_burst_duration=a.photo_burst_duration,
-        photo_burst_threshold=a.photo_burst_threshold, photo_zoom=a.photo_zoom, min_clip=a.min_clip, exclude=a.exclude or [],
+        photo_burst_threshold=a.photo_burst_threshold, photo_zoom=a.photo_zoom, min_clip=a.min_clip, long_video=a.long_video, exclude=a.exclude or [],
         gopro_trim=a.gopro_trim, photo_fit=a.photo_fit,
         caption=a.caption or bool(a.caption_name or a.caption_date), caption_name=a.caption_name,
         caption_date=a.caption_date, caption_duration=a.caption_duration, caption_font=a.caption_font,
@@ -423,6 +425,15 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
             log.info("--- Вне периода события, в конец ролика (%d) ---", len(outside))
         log.info("%s  %-5s  %s  [%s]", it.when.strftime("%Y-%m-%d %H:%M:%S"),
                  "видео" if it.kind == "video" else "фото", it.rel, it.date_source)
+
+    long_videos = [it for it in items if it.kind == "video" and s.long_video > 0
+                   and it.info.duration > s.long_video]
+    if long_videos:
+        log.info("")
+        log.info("--- Длинные видео, более %s (%d) ---", _fmt_dur(s.long_video), len(long_videos))
+        for it in long_videos:
+            log.info("%s  %s  %s", it.when.strftime("%Y-%m-%d %H:%M:%S"), _fmt_dur(it.info.duration), it.rel)
+        log.info("Общая длительность длинных видео: %s", _fmt_dur(sum(it.info.duration for it in long_videos)))
 
     caption_lines = []
     if s.caption:
