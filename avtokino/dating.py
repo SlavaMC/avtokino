@@ -84,10 +84,33 @@ def _bcd(b: int) -> int:
     return (b >> 4) * 10 + (b & 0x0F)
 
 
+def _ts_payload(raw: bytes) -> bytes:
+    """Склеивает полезную нагрузку пакетов MPEG-TS по потокам, чтобы SEI не рвался на границах пакетов.
+
+    Пакеты 188 байт (.ts) или 192 (.m2ts/.MTS с 4-байтной меткой времени). Если это не TS, возвращает как есть.
+    """
+    for size, off in ((192, 4), (188, 0)):
+        if len(raw) > size * 3 and all(raw[off + i * size] == 0x47 for i in range(3)):
+            break
+    else:
+        return raw
+    streams: dict[int, bytearray] = {}
+    for i in range(off, len(raw) - 187, size):
+        pkt = raw[i:i + 188]
+        if pkt[0] != 0x47:
+            continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        afc = (pkt[3] >> 4) & 0x3
+        start = 5 + pkt[4] if afc & 0x2 else 4
+        if afc & 0x1 and start < 188:
+            streams.setdefault(pid, bytearray()).extend(pkt[start:])
+    return b"".join(bytes(v) for v in streams.values())
+
+
 def avchd_date(path: Path) -> Evidence | None:
     """Дата съёмки из потока AVCHD (.MTS/.M2TS): блок MDPM в SEI H.264, как у камер Sony/Panasonic."""
     with open(path, "rb") as f:
-        data = f.read(2_000_000)
+        data = _ts_payload(f.read(4_000_000))
     pos = data.find(_AVCHD_UUID)
     while pos >= 0:
         win = data[pos + 16:pos + 120].replace(b"\x00\x00\x03", b"\x00\x00")
