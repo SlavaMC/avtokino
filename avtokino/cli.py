@@ -99,6 +99,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--music", type=Path, help="каталог с фоновой музыкой")
     g.add_argument("--music-volume", type=float, default=0.3, help="громкость музыки (0.3)")
     g.add_argument("--music-crossfade", type=float, default=3.0, help="перекрытие треков, с (3)")
+    g.add_argument("--music-shuffle", action="store_true", help="брать треки в случайном порядке")
     g.add_argument("--music-fadeout", type=float, default=5.0, help="затухание музыки в конце, с (5)")
     g.add_argument("--no-ducking", action="store_true", help="не приглушать музыку под живым звуком")
     g = p.add_argument_group("фото и монтаж")
@@ -160,7 +161,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         vbitrate=a.vbitrate, crf=a.crf, preset=a.preset, acodec=a.acodec, abitrate=a.abitrate,
         arate=a.arate, achannels=a.achannels, volume=a.volume,
         music_dir=a.music.resolve() if a.music else None, music_volume=a.music_volume,
-        music_crossfade=a.music_crossfade, music_fadeout=a.music_fadeout, ducking=not a.no_ducking,
+        music_crossfade=a.music_crossfade, music_fadeout=a.music_fadeout, music_shuffle=a.music_shuffle, ducking=not a.no_ducking,
         photo_duration=a.photo_duration, photo_burst_duration=a.photo_burst_duration,
         photo_burst_threshold=a.photo_burst_threshold, photo_zoom=a.photo_zoom, min_clip=a.min_clip, long_video=a.long_video, exclude=a.exclude or [],
         gopro_trim=a.gopro_trim, photo_fit=a.photo_fit,

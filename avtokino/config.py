@@ -37,6 +37,7 @@ class Settings:
     music_volume: float = 0.3
     music_crossfade: float = 3.0
     music_fadeout: float = 5.0
+    music_shuffle: bool = False          # брать треки в случайном порядке
     ducking: bool = True
     photo_duration: float = 5.0
     photo_burst_duration: float = 3.0

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from pathlib import Path
 
 from .config import MUSIC_EXTS, Settings
@@ -39,6 +40,9 @@ def build_music(total: float, s: Settings, tmp: Path) -> Path | None:
     if not tracks:
         log.warning("В каталоге музыки нет подходящих файлов: %s", s.music_dir)
         return None
+    if s.music_shuffle:
+        random.shuffle(tracks)
+        log.info("Музыка в случайном порядке: %s", ", ".join(t.name for t in tracks))
     xf = s.music_crossfade
     usable: list[tuple[Path, Path, float]] = []
     # Треков, нужных для ролика, может быть меньше, чем в каталоге; нормализуем по мере надобности.
