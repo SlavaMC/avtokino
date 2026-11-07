@@ -82,6 +82,16 @@ class ExcludeTest(unittest.TestCase):
         self.assertFalse(is_excluded("GoPro8/Screenshots", ["Mobile/Screenshots"]))
 
 
+class ShiftTest(unittest.TestCase):
+    def test_shift(self):
+        from avtokino.cli import _shift, shift_for
+        sh = [_shift("Olympus/*=10800"), _shift("DSC*.JPG = -3600.5")]
+        self.assertEqual(sh[1], ("DSC*.JPG", -3600.5))
+        self.assertEqual(shift_for("Olympus/P1010001.jpg", sh), ("Olympus/*", 10800))
+        self.assertEqual(shift_for("Mobile/dsc_01.jpg", sh), ("DSC*.JPG", -3600.5))
+        self.assertIsNone(shift_for("Mobile/IMG_1.jpg", sh))
+
+
 class FrameTest(unittest.TestCase):
     def test_frame(self):
         self.assertEqual(frame_16x9(1920, 1080), (1920, 1080))

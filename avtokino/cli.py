@@ -54,6 +54,25 @@ def _time_fix(value: str):
         raise argparse.ArgumentTypeError(str(e))
 
 
+def _shift(value: str) -> tuple[str, float]:
+    m = re.fullmatch(r"\s*(.+?)\s*=\s*([+-]?\d+(?:\.\d+)?)\s*", value)
+    if not m:
+        raise argparse.ArgumentTypeError(f"ожидается «МАСКА=СЕКУНДЫ», например «DSC*.jpg=-3600», получено: {value}")
+    return m[1].replace("\\", "/"), float(m[2])
+
+
+def shift_for(rel: str, shifts: list[tuple[str, float]]) -> tuple[str, float] | None:
+    """Первый подходящий сдвиг. Маска без «/» сравнивается с именем файла, с «/» — с путём
+    от рабочего каталога; регистр не важен."""
+    rel_cf = rel.casefold()
+    name = rel_cf.rsplit("/", 1)[-1]
+    for mask, sec in shifts:
+        m = mask.strip("/").casefold()
+        if fnmatch.fnmatchcase(rel_cf if "/" in m else name, m):
+            return mask, sec
+    return None
+
+
 def _fps(value: str) -> Fraction:
     return Fraction(value).limit_denominator(1001)
 
@@ -104,6 +123,10 @@ def parse_args(argv: list[str] | None = None) -> Settings:
                    help="поправка сбитых часов: \"2016-01-04 23:02:42 -> 2025-06-20 09:48:00\"; "
                         "применяется к файлам вне периода события, если с ней они в него попадают; "
                         "можно указать несколько, пробуются по порядку")
+    g.add_argument("--shift", action="append", type=_shift, metavar="'МАСКА=СЕК'",
+                   help="сдвинуть дату съёмки файлов по маске на СЕК секунд (минус — назад), например "
+                        "\"DSC*.jpg=-3600\" или \"Olympus/*=10800\"; можно указать несколько, "
+                        "к файлу применяется первый подошедший")
     g.add_argument("--tz", help="часовой пояс съёмки (Europe/Moscow или +03:00), если не определился сам")
     g.add_argument("--transition", choices=["none", "fade"], default="none",
                    help="переходы: fade = через чёрное (требует перекодировки всех клипов)")
@@ -141,7 +164,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         gopro_trim=a.gopro_trim, photo_fit=a.photo_fit,
         caption=a.caption or bool(a.caption_name or a.caption_date), caption_name=a.caption_name,
         caption_date=a.caption_date, caption_duration=a.caption_duration, caption_font=a.caption_font,
-        tz=a.tz, date_tolerance=a.date_tolerance, time_fixes=a.time_fix or [],
+        tz=a.tz, date_tolerance=a.date_tolerance, time_fixes=a.time_fix or [], shifts=a.shift or [],
         transition=a.transition, transition_duration=a.transition_duration,
         title=a.title or bool(a.title_text), title_text=a.title_text,
         title_duration=a.title_duration, jobs=max(1, a.jobs), temp_dir=a.temp_dir,
@@ -333,6 +356,19 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     for p, kind, info, meta, name, fs in raw:
         dr = resolve(meta, name, fs, offset)
         items.append(Item(p, p.relative_to(s.workdir).as_posix(), kind, info, dr.when, dr.source))
+    if s.shifts:
+        for mask, sec in s.shifts:
+            log.info("Сдвиг даты: %s на %+g с", mask, sec)
+        for it in items:
+            hit = shift_for(it.rel, s.shifts)
+            if hit:
+                old = it.when
+                it.when += timedelta(seconds=hit[1])
+                it.date_source += f", сдвиг {hit[1]:+g} с ({hit[0]})"
+                log.debug("  %s: %s → %s", it.rel, old.strftime("%Y-%m-%d %H:%M:%S"),
+                          it.when.strftime("%Y-%m-%d %H:%M:%S"))
+        n = sum(1 for it in items if shift_for(it.rel, s.shifts))
+        log.info("Сдвиг даты применён к %d файл(ам)", n)
     # Файлы с датой вне периода события идут в конец, между собой тоже по времени.
     period = event.period(timedelta(hours=s.date_tolerance))
     outside = set()

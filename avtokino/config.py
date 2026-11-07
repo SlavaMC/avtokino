@@ -54,6 +54,7 @@ class Settings:
     tz: str | None = None
     date_tolerance: float = 6.0          # часов запаса вокруг периода события
     time_fixes: list | None = None       # поправки сбитых часов (timedelta), пробуются по порядку
+    shifts: list | None = None           # сдвиги даты по маске файла: [(маска, секунды)]
     transition: str = "none"
     transition_duration: float = 0.5
     title: bool = False
