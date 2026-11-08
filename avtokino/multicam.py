@@ -327,6 +327,7 @@ def multicam(args) -> int:
         return audio_cache[c.path]
 
     edges = []
+    wide_diffs: list[float] = []
     for x, y in pairs:
         expected = (y.meta_start - x.meta_start).total_seconds()  # начало B − начало A
         label = f"{x.name} ↔ {y.name}"
@@ -338,6 +339,18 @@ def multicam(args) -> int:
         except Exception as e:  # noqa: BLE001
             rep(f"{label}: не удалось сверить ({e})")
             continue
+        if r is None or not r.reliable:
+            # часы могут расходиться сильнее, чем ожидалось: ищем сдвиг без ограничений
+            try:
+                wide = find_lag(audio_of(x), audio_of(y))
+            except Exception:  # noqa: BLE001
+                wide = None
+            if wide is not None and wide.reliable:
+                rep(f"{label}: в пределах ±{args.search:g} с от метаданных общего звука нет, "
+                    f"но без ограничения найден надёжный сдвиг (часы B расходятся с A на "
+                    f"{wide.lag - expected:+.1f} с)")
+                r = wide
+                wide_diffs.append(wide.lag - expected)
         if r is None:
             rep(f"{label}: общего звука не нашлось")
             continue
@@ -352,6 +365,17 @@ def multicam(args) -> int:
         elif r.doubtful:
             rep("    сомнительный сдвиг не используется (принять: --accept-doubtful)")
     audio_cache.clear()
+    if wide_diffs and not getattr(args, "_auto_offset", False):
+        # Часы сильно расходятся: заново раскладываем файлы с найденной поправкой, иначе часть пар не найдётся.
+        import statistics
+        fix = offset + statistics.median(wide_diffs)
+        rep()
+        rep(f"Часы B расходятся с A примерно на {fix:+.1f} с. Повторяю подбор пар с --offset={fix:+.1f}")
+        rep("(в следующий раз эту поправку можно указать сразу)")
+        rep()
+        args.offset = f"{fix:+.2f}"
+        args._auto_offset = True
+        return multicam(args)
 
     groups = _components(clips, edges)
     lonely = [c for c in clips if not any(c in g for g in groups)]
