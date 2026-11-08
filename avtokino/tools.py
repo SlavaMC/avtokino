@@ -5,6 +5,7 @@
   timelapse   собрать ролик из последовательности фото, одно фото = один кадр
   rotate180   перевернуть видео на 180° без перекодировки
   sync        рассинхронизация двух роликов с разных камер по звуку
+  multicam    общий ролик из двух камер с переключением каждые N секунд
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from .probe import probe_duration
@@ -421,6 +423,96 @@ def _video_start(ffprobe: str, path: Path):
     return info, meta, name_date(path), fs, vote
 
 
+@dataclass
+class LagResult:
+    lag: float          # начало B − начало A, с (= на сколько позже тот же звук в A)
+    reliable: bool
+    doubtful: bool
+    text: str
+    drift: tuple | None
+
+
+def find_lag(a, b, lo: float | None = None, hi: float | None = None) -> LagResult | None:
+    """Сдвиг между звуком a и b (оба SYNC_RATE, моно). lo/hi ограничивают искомый сдвиг, с."""
+    import numpy as np
+    # 1) грубо: B режется на куски по 30 с, каждый ищется во всём A (GCC-PHAT на 2 кГц),
+    #    куски голосуют за сдвиг. Так не мешают ни уход часов камер, ни участки без общего звука.
+    dec = SYNC_RATE // COARSE_RATE
+    ca = a[:len(a) // dec * dec].astype(np.float64).reshape(-1, dec).mean(axis=1)
+    cb = b[:len(b) // dec * dec].astype(np.float64).reshape(-1, dec).mean(axis=1)
+    chunk = 30 * COARSE_RATE
+    starts = list(range(0, max(1, len(cb) - chunk // 2), chunk)) or [0]
+    n = 1 << int(np.ceil(np.log2(len(ca) + chunk)))
+    freqs = np.fft.rfftfreq(n, 1 / COARSE_RATE)
+    band = (freqs >= 100) & (freqs <= 900)
+    FA = np.fft.rfft(ca, n)
+    votes: dict[int, list] = {}
+    for st in starts:
+        piece = cb[st:st + chunk]
+        if len(piece) < 5 * COARSE_RATE or piece.std() < 1e-5:
+            continue
+        X = FA * np.conj(np.fft.rfft(piece, n))
+        X[~band] = 0
+        cc = np.fft.irfft(X / (np.abs(X) + 1e-12), n)
+        # задержка k: piece[t] ≈ ca[t + k], k от −len(piece)+1 до len(ca)−1
+        cc = np.concatenate([cc[n - (len(piece) - 1):], cc[:len(ca)]])
+        lags = np.arange(len(cc)) - (len(piece) - 1) - st  # t_A − t_B
+        if lo is not None or hi is not None:
+            ok = np.ones(len(cc), bool)
+            if lo is not None:
+                ok &= lags >= lo * COARSE_RATE
+            if hi is not None:
+                ok &= lags <= hi * COARSE_RATE
+            if not ok.any():
+                continue
+            cc = np.where(ok, cc, -np.inf)
+        k = int(np.argmax(cc))
+        side = np.abs(np.delete(cc, range(max(0, k - 20), k + 21)))
+        side = side[np.isfinite(side)]
+        q = float(cc[k] / (np.percentile(side, 99.99) + 1e-12)) if len(side) else 0.0
+        bin_ = int(round(lags[k] / (0.1 * COARSE_RATE)))  # корзины по 0,1 с
+        votes.setdefault(bin_, []).append((q, int(lags[k])))
+    used = sum(len(v) for v in votes.values())
+    if not used:
+        return None
+    # соседние корзины объединяем: сдвиг на границе 0,1 с не должен делить голоса
+    best_bin = max(votes, key=lambda k: sum(q for k2 in (k - 1, k, k + 1) for q, _ in votes.get(k2, [])))
+    group = [x for k2 in (best_bin - 1, best_bin, best_bin + 1) for x in votes.get(k2, [])]
+    agree = len(group)
+    coarse = int(np.median([lag for _, lag in group])) * dec
+
+    # 2) точно: GCC-PHAT ±50 мс вокруг грубой оценки на кусках общего участка по 20 с
+    start_a, start_b = max(0, coarse), max(0, -coarse)
+    total = min(len(a) - start_a, len(b) - start_b)
+    if total < 2 * SYNC_RATE:
+        return None
+
+    def fine_at(pos: int, length: int):
+        seg_a = a[start_a + pos:start_a + pos + length].astype(np.float64)
+        seg_b = b[start_b + pos:start_b + pos + length].astype(np.float64)
+        f, q = _gcc_phat(seg_a, seg_b, int(0.05 * SYNC_RATE))
+        return coarse / SYNC_RATE + f, q
+
+    length = min(total, 60 * SYNC_RATE)
+    lag, fine_q = fine_at((total - length) // 2, length)   # середина общего участка
+    drift = None
+    if total >= 120 * SYNC_RATE:  # начало и конец: уход часов одной камеры относительно другой
+        win = 20 * SYNC_RATE
+        (l1, q1), (l2, q2) = fine_at(5 * SYNC_RATE, win), fine_at(total - win - 5 * SYNC_RATE, win)
+        if min(q1, q2) >= 1.2 and abs(l2 - l1) < 0.05:
+            drift = (l1, l2, (total - win - 10 * SYNC_RATE) / SYNC_RATE)
+    # надёжность: сколько 30-секундных кусков B указали на тот же сдвиг, и чёткость точного пика
+    if used >= 3:
+        reliable = agree >= max(2, 0.3 * used)
+        doubtful = not reliable and agree >= 2
+    else:
+        reliable, doubtful = fine_q >= 3, fine_q >= 1.5
+    quality_text = (f"кусков по 30 с, согласных со сдвигом: {agree} из {used}; " if used >= 3 else "") + \
+        f"чёткость пика {fine_q:.1f}"
+
+    return LagResult(lag, reliable, doubtful, quality_text, drift)
+
+
 def sync(args) -> int:
     try:
         import numpy as np
@@ -446,75 +538,11 @@ def sync(args) -> int:
         print("Слишком короткий звук для сверки (нужно хотя бы 2 с)", file=sys.stderr)
         return 1
 
-    # 1) грубо: B режется на куски по 30 с, каждый ищется во всём A (GCC-PHAT на 2 кГц),
-    #    куски голосуют за сдвиг. Так не мешают ни уход часов камер, ни участки без общего звука.
-    dec = SYNC_RATE // COARSE_RATE
-    ca = a[:len(a) // dec * dec].astype(np.float64).reshape(-1, dec).mean(axis=1)
-    cb = b[:len(b) // dec * dec].astype(np.float64).reshape(-1, dec).mean(axis=1)
-    chunk = 30 * COARSE_RATE
-    starts = list(range(0, max(1, len(cb) - chunk // 2), chunk)) or [0]
-    n = 1 << int(np.ceil(np.log2(len(ca) + chunk)))
-    freqs = np.fft.rfftfreq(n, 1 / COARSE_RATE)
-    band = (freqs >= 100) & (freqs <= 900)
-    FA = np.fft.rfft(ca, n)
-    votes: dict[int, list] = {}
-    for st in starts:
-        piece = cb[st:st + chunk]
-        if len(piece) < 5 * COARSE_RATE or piece.std() < 1e-5:
-            continue
-        X = FA * np.conj(np.fft.rfft(piece, n))
-        X[~band] = 0
-        cc = np.fft.irfft(X / (np.abs(X) + 1e-12), n)
-        # задержка k: piece[t] ≈ ca[t + k], k от −len(piece)+1 до len(ca)−1
-        cc = np.concatenate([cc[n - (len(piece) - 1):], cc[:len(ca)]])
-        lags = np.arange(len(cc)) - (len(piece) - 1) - st  # t_A − t_B
-        if args.max_offset:
-            cc = np.where(np.abs(lags) <= args.max_offset * COARSE_RATE, cc, -np.inf)
-        k = int(np.argmax(cc))
-        side = np.abs(np.delete(cc, range(max(0, k - 20), k + 21)))
-        side = side[np.isfinite(side)]
-        q = float(cc[k] / (np.percentile(side, 99.99) + 1e-12)) if len(side) else 0.0
-        bin_ = int(round(lags[k] / (0.1 * COARSE_RATE)))  # корзины по 0,1 с
-        votes.setdefault(bin_, []).append((q, int(lags[k])))
-    used = sum(len(v) for v in votes.values())
-    if not used:
-        print("Не нашлось звука для сверки", file=sys.stderr)
+    r = find_lag(a, b, -args.max_offset if args.max_offset else None, args.max_offset)
+    if r is None:
+        print("Не нашлось общего звука для сверки", file=sys.stderr)
         return 3
-    # соседние корзины объединяем: сдвиг на границе 0,1 с не должен делить голоса
-    best_bin = max(votes, key=lambda k: sum(q for k2 in (k - 1, k, k + 1) for q, _ in votes.get(k2, [])))
-    group = [x for k2 in (best_bin - 1, best_bin, best_bin + 1) for x in votes.get(k2, [])]
-    agree = len(group)
-    coarse = int(np.median([lag for _, lag in group])) * dec
-
-    # 2) точно: GCC-PHAT ±50 мс вокруг грубой оценки на кусках общего участка по 20 с
-    start_a, start_b = max(0, coarse), max(0, -coarse)
-    total = min(len(a) - start_a, len(b) - start_b)
-    if total < 2 * SYNC_RATE:
-        print("Ролики почти не перекрываются по времени, сверить не удалось", file=sys.stderr)
-        return 3
-
-    def fine_at(pos: int, length: int):
-        seg_a = a[start_a + pos:start_a + pos + length].astype(np.float64)
-        seg_b = b[start_b + pos:start_b + pos + length].astype(np.float64)
-        f, q = _gcc_phat(seg_a, seg_b, int(0.05 * SYNC_RATE))
-        return coarse / SYNC_RATE + f, q
-
-    length = min(total, 60 * SYNC_RATE)
-    lag, fine_q = fine_at((total - length) // 2, length)   # середина общего участка
-    drift = None
-    if total >= 120 * SYNC_RATE:  # начало и конец: уход часов одной камеры относительно другой
-        win = 20 * SYNC_RATE
-        (l1, q1), (l2, q2) = fine_at(5 * SYNC_RATE, win), fine_at(total - win - 5 * SYNC_RATE, win)
-        if min(q1, q2) >= 1.2 and abs(l2 - l1) < 0.05:
-            drift = (l1, l2, (total - win - 10 * SYNC_RATE) / SYNC_RATE)
-    # надёжность: сколько 30-секундных кусков B указали на тот же сдвиг, и чёткость точного пика
-    if used >= 3:
-        reliable = agree >= max(2, 0.3 * used)
-        doubtful = not reliable and agree >= 2
-    else:
-        reliable, doubtful = fine_q >= 3, fine_q >= 1.5
-    quality_text = (f"кусков по 30 с, согласных со сдвигом: {agree} из {used}; " if used >= 3 else "") + \
-        f"чёткость пика {fine_q:.1f}"
+    lag, reliable, doubtful, quality_text, drift = (r.lag, r.reliable, r.doubtful, r.text, r.drift)
 
     infos = [_video_start(args.ffprobe, p) for p in paths]
     names = [p.name for p in paths]
@@ -621,6 +649,9 @@ def main(argv: list[str] | None = None) -> int:
     sy.add_argument("--max-duration", type=float, metavar="СЕК",
                     help="читать только первые СЕК секунд звука каждого ролика (для очень длинных файлов)")
     sy.set_defaults(func=sync)
+
+    from .multicam import add_parser as _add_multicam
+    _add_multicam(sub, _parse_resolution)
 
     a = p.parse_args(argv)
     if a.command == "trim" and (a.start is not None or a.end is not None) and (a.cut_start or a.cut_end):

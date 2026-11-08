@@ -100,5 +100,30 @@ class FrameTest(unittest.TestCase):
         self.assertEqual(frame_16x9(3840, 2160), (3840, 2160))
 
 
+
+class MulticamTest(unittest.TestCase):
+    def test_offset(self):
+        from avtokino.multicam import parse_offset
+        self.assertEqual(parse_offset("+3:07"), 187)
+        self.assertEqual(parse_offset("-187.5"), -187.5)
+        self.assertEqual(parse_offset("1:02:03"), 3723)
+
+    def test_plan_alternates(self):
+        from fractions import Fraction
+        from types import SimpleNamespace
+        from datetime import datetime
+        from avtokino.multicam import Clip, _plan
+        def clip(cam, start, dur):
+            info = SimpleNamespace(duration=dur, has_audio=True)
+            return Clip(cam, Path(f"{cam}{start}.mp4"), info, datetime(2024, 1, 1), "", start=start)
+        a, b = clip("A", 0, 20), clip("B", 7, 20)
+        pieces = _plan([a, b], 5, Fraction(25), None, False)
+        self.assertEqual([(p.t0, p.t1, p.video.cam) for p in pieces],
+                         [(0, 7, "A"), (7, 10, "B"), (10, 15, "A"), (15, 27, "B")])
+        only = _plan([a, b], 5, Fraction(25), "A", True)
+        self.assertEqual(only[0].t0, 7)
+        self.assertTrue(all(p.audio is a for p in only))
+
+
 if __name__ == "__main__":
     unittest.main()
