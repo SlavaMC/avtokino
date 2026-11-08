@@ -4,6 +4,7 @@
   trim        вырезать кусок видео без перекодировки
   timelapse   собрать ролик из последовательности фото, одно фото = один кадр
   rotate180   перевернуть видео на 180° без перекодировки
+  sync        рассинхронизация двух роликов с разных камер по звуку
 """
 from __future__ import annotations
 
@@ -355,6 +356,172 @@ def datetime_from_ts(ts: float):
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
+# --- sync ---------------------------------------------------------------------
+
+SYNC_RATE = 16000      # Гц, звук для точной сверки
+ENV_RATE = 100         # Гц, огибающая для грубого поиска (шаг 10 мс)
+
+
+def _load_audio(ffmpeg: str, path: Path, max_len: float | None):
+    import numpy as np
+    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", str(path),
+           "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(SYNC_RATE)]
+    if max_len:
+        cmd += ["-t", f"{max_len:g}"]
+    cmd += ["-f", "f32le", "-"]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0 or not proc.stdout:
+        err = proc.stderr.decode("utf-8", errors="replace").strip() or "нет звуковой дорожки"
+        raise RuntimeError(err.splitlines()[-1])
+    return np.frombuffer(proc.stdout, dtype=np.float32)
+
+
+def _onsets(x):
+    """Огибающая «всплесков» громкости, 100 значений в секунду: не зависит от микрофона и уровня записи."""
+    import numpy as np
+    hop = SYNC_RATE // ENV_RATE
+    n = len(x) // hop
+    frames = x[:n * hop].astype(np.float64).reshape(n, hop)
+    e = np.log(np.sqrt((frames ** 2).mean(axis=1)) + 1e-4)
+    d = np.maximum(0.0, np.diff(e, prepend=e[:1]))
+    d -= d.mean()
+    return d / (d.std() + 1e-9)
+
+
+def _xcorr(a, b):
+    """c[k] = Σ a[t+k]·b[t] для k от −(len(b)−1) до len(a)−1; возвращает (c, сдвиг индекса нуля)."""
+    import numpy as np
+    n = 1 << int(np.ceil(np.log2(len(a) + len(b))))
+    c = np.fft.irfft(np.fft.rfft(a, n) * np.conj(np.fft.rfft(b, n)), n)
+    c = np.concatenate([c[n - (len(b) - 1):], c[:len(a)]]) if len(b) > 1 else c[:len(a)]
+    return c, len(b) - 1
+
+
+def _gcc_phat(a, b, max_lag: int):
+    """Точная задержка: обобщённая взаимная корреляция с фазовым преобразованием (GCC-PHAT)."""
+    import numpy as np
+    n = 1 << int(np.ceil(np.log2(len(a) + len(b))))
+    X = np.fft.rfft(a, n) * np.conj(np.fft.rfft(b, n))
+    freqs = np.fft.rfftfreq(n, 1 / SYNC_RATE)
+    X[(freqs < 100) | (freqs > 6000)] = 0  # гул и шипение только мешают
+    cc = np.fft.irfft(X / (np.abs(X) + 1e-12), n)
+    cc = np.concatenate([cc[-max_lag:], cc[:max_lag + 1]])
+    k = int(np.argmax(cc))
+    shift = 0.0
+    if 0 < k < len(cc) - 1:  # параболическая интерполяция между отсчётами
+        y0, y1, y2 = cc[k - 1], cc[k], cc[k + 1]
+        den = y0 - 2 * y1 + y2
+        shift = 0.5 * (y0 - y2) / den if den else 0.0
+    side = np.delete(cc, range(max(0, k - 40), min(len(cc), k + 41)))
+    quality = float(cc[k] / (np.abs(side).max() + 1e-12)) if len(side) else 0.0
+    return (k - max_lag + shift) / SYNC_RATE, quality
+
+
+def _video_start(ffprobe: str, path: Path):
+    """(время начала съёмки по метаданным как Evidence, fps, длительность)."""
+    from .dating import check_utc, fs_date, name_date, video_meta
+    from .probe import probe_video
+    info = probe_video(ffprobe, path)
+    fs = fs_date(path)
+    meta, vote = check_utc(video_meta(info), fs, info.duration)
+    return info, meta, name_date(path), fs, vote
+
+
+def sync(args) -> int:
+    try:
+        import numpy as np
+    except ImportError:
+        print("Для команды sync нужен numpy: pip install numpy", file=sys.stderr)
+        return 2
+    from datetime import timedelta
+
+    from .dating import estimate_offset, resolve
+
+    paths = [Path(args.a).resolve(), Path(args.b).resolve()]
+    for p in paths:
+        if not p.is_file():
+            print(f"Файл не найден: {p}", file=sys.stderr)
+            return 2
+    try:
+        audio = [_load_audio(args.ffmpeg, p, args.max_duration) for p in paths]
+    except RuntimeError as e:
+        print(f"Не удалось прочитать звук: {e}", file=sys.stderr)
+        return 1
+    a, b = audio
+    if min(len(a), len(b)) < SYNC_RATE * 2:
+        print("Слишком короткий звук для сверки (нужно хотя бы 2 с)", file=sys.stderr)
+        return 1
+
+    # 1) грубо: по огибающим целиком, с точностью ~10 мс
+    ea, eb = _onsets(a), _onsets(b)
+    c, zero = _xcorr(ea, eb)
+    lags = np.arange(len(c)) - zero
+    overlap = np.minimum(len(ea), lags + len(eb)) - np.maximum(0, lags)
+    min_overlap = min(len(ea), len(eb), 10 * ENV_RATE) * 0.5
+    c = np.where(overlap >= min_overlap, c / np.maximum(overlap, 1), -np.inf)
+    if args.max_offset:
+        c = np.where(np.abs(lags) <= args.max_offset * ENV_RATE, c, -np.inf)
+    coarse = int(lags[int(np.argmax(c))]) * (SYNC_RATE // ENV_RATE)  # в отсчётах SYNC_RATE: t_A − t_B
+
+    # 2) точно: GCC-PHAT на общем участке до 60 с, поиск ±50 мс вокруг грубой оценки
+    start_a = max(0, coarse)
+    start_b = max(0, -coarse)
+    length = min(len(a) - start_a, len(b) - start_b, 60 * SYNC_RATE)
+    # берём середину общего участка: там меньше шансов, что одна из камер ещё не включилась
+    total = min(len(a) - start_a, len(b) - start_b)
+    mid = max(0, (total - length) // 2)
+    seg_a = a[start_a + mid:start_a + mid + length].astype(np.float64)
+    seg_b = b[start_b + mid:start_b + mid + length].astype(np.float64)
+    fine, quality = _gcc_phat(seg_a, seg_b, int(0.05 * SYNC_RATE))
+    lag = coarse / SYNC_RATE + fine          # звук в A позже, чем в B, на lag секунд
+
+    infos = [_video_start(args.ffprobe, p) for p in paths]
+    names = [p.name for p in paths]
+    print(f"A: {names[0]}")
+    print(f"B: {names[1]}")
+    print()
+    if lag >= 0:
+        print(f"A начал запись на {lag:.3f} с раньше B: один и тот же звук в A на {lag:.3f} с дальше от начала.")
+    else:
+        print(f"B начал запись на {-lag:.3f} с раньше A: один и тот же звук в B на {-lag:.3f} с дальше от начала.")
+    print(f"Момент 0:00.000 в A соответствует {_fmt_t(-lag)} в B.")
+    for name, (info, *_rest) in zip("AB", infos):
+        fps = float(info.fps) if info.fps else 0
+        if fps:
+            print(f"  в кадрах {name} ({fps:.3f} кадр/с): {abs(lag) * fps:.1f}")
+    verdict = ("надёжно" if quality >= 3 else "сомнительно" if quality >= 1.5 else
+               "ненадёжно: похоже, звук роликов не перекрывается")
+    print(f"Уверенность: {quality:.1f} ({verdict})")
+
+    # сравнение с метаданными: какую поправку дать в --shift, чтобы avtokino поставил их точно
+    est = estimate_offset([(m, n) for _, m, n, _, _ in infos], [v for *_, v in infos if v is not None])
+    off = est[0] if est else (datetime_from_ts(0).astimezone().utcoffset() or timedelta(0))
+    starts = [resolve(m, n, fs, off) for _, m, n, fs, _ in infos]
+    meta_diff = (starts[1].when - starts[0].when).total_seconds()
+    real_diff = lag                          # начало B − начало A по звуку
+    print()
+    print(f"По метаданным: A {starts[0].when:%Y-%m-%d %H:%M:%S} [{starts[0].source}]")
+    print(f"               B {starts[1].when:%Y-%m-%d %H:%M:%S} [{starts[1].source}]")
+    fix = real_diff - meta_diff
+    print(f"По метаданным B начат на {meta_diff:+.2f} с относительно A, по звуку на {real_diff:+.3f} с.")
+    if quality < 1.5:
+        print("Сдвиг по звуку ненадёжен, поправку для --shift не предлагаю.")
+    elif abs(fix) >= 0.5:
+        from .dating import fmt_delta
+        print(f"Часы B расходятся с часами A на {fmt_delta(timedelta(seconds=-fix))}.")
+        print(f"Чтобы avtokino считал время B по часам A: --shift \"{names[1]}={fix:+.2f}\"")
+    else:
+        print("Часы камер расходятся меньше чем на 0,5 с, поправка не нужна.")
+    return 0 if quality >= 1.5 else 3
+
+
+def _fmt_t(sec: float) -> str:
+    sign = "−" if sec < 0 else ""
+    sec = abs(sec)
+    m, s_ = divmod(sec, 60)
+    return f"{sign}{int(m)}:{s_:06.3f}"
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="avtokino.tools", description="Служебные команды для файлов.")
     p.add_argument("--ffmpeg", default="ffmpeg", help="путь к ffmpeg")
@@ -396,6 +563,18 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("masks", nargs="+", metavar="МАСКА", help="файлы или маски, например *.MP4 или E:\\video\\GOPR*.MP4")
     r.add_argument("--force", action="store_true", help="перезаписать существующий результат")
     r.set_defaults(func=rotate180)
+
+    sy = sub.add_parser("sync", help="рассинхронизация двух роликов с разных камер по звуку",
+                        description="Находит, на сколько сдвинуты друг относительно друга два ролика, снятые "
+                                    "одновременно разными камерами: сравнивает их звук. Точность лучше 0,01 с. "
+                                    "Также сравнивает результат с датами съёмки и подсказывает --shift для avtokino.")
+    sy.add_argument("a", help="первый ролик (A)")
+    sy.add_argument("b", help="второй ролик (B)")
+    sy.add_argument("--max-offset", type=float, metavar="СЕК",
+                    help="искать сдвиг не больше СЕК секунд (по умолчанию любой)")
+    sy.add_argument("--max-duration", type=float, metavar="СЕК",
+                    help="читать только первые СЕК секунд звука каждого ролика (для очень длинных файлов)")
+    sy.set_defaults(func=sync)
 
     a = p.parse_args(argv)
     if a.command == "trim" and (a.start is not None or a.end is not None) and (a.cut_start or a.cut_end):

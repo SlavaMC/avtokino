@@ -1,3 +1,4 @@
 Pillow>=10.1
 pillow-heif>=0.16   # фото HEIC/HEIF с iPhone (необязательно)
 tzdata; sys_platform == "win32"   # часовые пояса для --tz на Windows
+numpy>=1.24          # только для команды avtokino.tools sync
