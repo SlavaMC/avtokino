@@ -359,7 +359,7 @@ def datetime_from_ts(ts: float):
 # --- sync ---------------------------------------------------------------------
 
 SYNC_RATE = 16000      # Гц, звук для точной сверки
-ENV_RATE = 100         # Гц, огибающая для грубого поиска (шаг 10 мс)
+COARSE_RATE = 2000     # Гц, звук для грубого поиска по всей длине
 
 
 def _load_audio(ffmpeg: str, path: Path, max_len: float | None):
@@ -376,25 +376,19 @@ def _load_audio(ffmpeg: str, path: Path, max_len: float | None):
     return np.frombuffer(proc.stdout, dtype=np.float32)
 
 
-def _onsets(x):
-    """Огибающая «всплесков» громкости, 100 значений в секунду: не зависит от микрофона и уровня записи."""
-    import numpy as np
-    hop = SYNC_RATE // ENV_RATE
-    n = len(x) // hop
-    frames = x[:n * hop].astype(np.float64).reshape(n, hop)
-    e = np.log(np.sqrt((frames ** 2).mean(axis=1)) + 1e-4)
-    d = np.maximum(0.0, np.diff(e, prepend=e[:1]))
-    d -= d.mean()
-    return d / (d.std() + 1e-9)
-
-
-def _xcorr(a, b):
-    """c[k] = Σ a[t+k]·b[t] для k от −(len(b)−1) до len(a)−1; возвращает (c, сдвиг индекса нуля)."""
+def _gcc_full(a, b, rate: int, lo: float, hi: float):
+    """GCC-PHAT по всей длине: (корреляция, задержки t_A − t_B в отсчётах) для всех возможных сдвигов."""
     import numpy as np
     n = 1 << int(np.ceil(np.log2(len(a) + len(b))))
-    c = np.fft.irfft(np.fft.rfft(a, n) * np.conj(np.fft.rfft(b, n)), n)
-    c = np.concatenate([c[n - (len(b) - 1):], c[:len(a)]]) if len(b) > 1 else c[:len(a)]
-    return c, len(b) - 1
+    X = np.fft.rfft(a, n) * np.conj(np.fft.rfft(b, n))
+    freqs = np.fft.rfftfreq(n, 1 / rate)
+    X[(freqs < lo) | (freqs > hi)] = 0
+    X /= np.abs(X) + 1e-12
+    cc = np.fft.irfft(X, n)
+    del X
+    cc = np.concatenate([cc[n - (len(b) - 1):], cc[:len(a)]])
+    lags = np.arange(len(cc)) - (len(b) - 1)
+    return cc, lags
 
 
 def _gcc_phat(a, b, max_lag: int):
@@ -452,28 +446,75 @@ def sync(args) -> int:
         print("Слишком короткий звук для сверки (нужно хотя бы 2 с)", file=sys.stderr)
         return 1
 
-    # 1) грубо: по огибающим целиком, с точностью ~10 мс
-    ea, eb = _onsets(a), _onsets(b)
-    c, zero = _xcorr(ea, eb)
-    lags = np.arange(len(c)) - zero
-    overlap = np.minimum(len(ea), lags + len(eb)) - np.maximum(0, lags)
-    min_overlap = min(len(ea), len(eb), 10 * ENV_RATE) * 0.5
-    c = np.where(overlap >= min_overlap, c / np.maximum(overlap, 1), -np.inf)
-    if args.max_offset:
-        c = np.where(np.abs(lags) <= args.max_offset * ENV_RATE, c, -np.inf)
-    coarse = int(lags[int(np.argmax(c))]) * (SYNC_RATE // ENV_RATE)  # в отсчётах SYNC_RATE: t_A − t_B
+    # 1) грубо: B режется на куски по 30 с, каждый ищется во всём A (GCC-PHAT на 2 кГц),
+    #    куски голосуют за сдвиг. Так не мешают ни уход часов камер, ни участки без общего звука.
+    dec = SYNC_RATE // COARSE_RATE
+    ca = a[:len(a) // dec * dec].astype(np.float64).reshape(-1, dec).mean(axis=1)
+    cb = b[:len(b) // dec * dec].astype(np.float64).reshape(-1, dec).mean(axis=1)
+    chunk = 30 * COARSE_RATE
+    starts = list(range(0, max(1, len(cb) - chunk // 2), chunk)) or [0]
+    n = 1 << int(np.ceil(np.log2(len(ca) + chunk)))
+    freqs = np.fft.rfftfreq(n, 1 / COARSE_RATE)
+    band = (freqs >= 100) & (freqs <= 900)
+    FA = np.fft.rfft(ca, n)
+    votes: dict[int, list] = {}
+    for st in starts:
+        piece = cb[st:st + chunk]
+        if len(piece) < 5 * COARSE_RATE or piece.std() < 1e-5:
+            continue
+        X = FA * np.conj(np.fft.rfft(piece, n))
+        X[~band] = 0
+        cc = np.fft.irfft(X / (np.abs(X) + 1e-12), n)
+        # задержка k: piece[t] ≈ ca[t + k], k от −len(piece)+1 до len(ca)−1
+        cc = np.concatenate([cc[n - (len(piece) - 1):], cc[:len(ca)]])
+        lags = np.arange(len(cc)) - (len(piece) - 1) - st  # t_A − t_B
+        if args.max_offset:
+            cc = np.where(np.abs(lags) <= args.max_offset * COARSE_RATE, cc, -np.inf)
+        k = int(np.argmax(cc))
+        side = np.abs(np.delete(cc, range(max(0, k - 20), k + 21)))
+        side = side[np.isfinite(side)]
+        q = float(cc[k] / (np.percentile(side, 99.99) + 1e-12)) if len(side) else 0.0
+        bin_ = int(round(lags[k] / (0.1 * COARSE_RATE)))  # корзины по 0,1 с
+        votes.setdefault(bin_, []).append((q, int(lags[k])))
+    used = sum(len(v) for v in votes.values())
+    if not used:
+        print("Не нашлось звука для сверки", file=sys.stderr)
+        return 3
+    # соседние корзины объединяем: сдвиг на границе 0,1 с не должен делить голоса
+    best_bin = max(votes, key=lambda k: sum(q for k2 in (k - 1, k, k + 1) for q, _ in votes.get(k2, [])))
+    group = [x for k2 in (best_bin - 1, best_bin, best_bin + 1) for x in votes.get(k2, [])]
+    agree = len(group)
+    coarse = int(np.median([lag for _, lag in group])) * dec
 
-    # 2) точно: GCC-PHAT на общем участке до 60 с, поиск ±50 мс вокруг грубой оценки
-    start_a = max(0, coarse)
-    start_b = max(0, -coarse)
-    length = min(len(a) - start_a, len(b) - start_b, 60 * SYNC_RATE)
-    # берём середину общего участка: там меньше шансов, что одна из камер ещё не включилась
+    # 2) точно: GCC-PHAT ±50 мс вокруг грубой оценки на кусках общего участка по 20 с
+    start_a, start_b = max(0, coarse), max(0, -coarse)
     total = min(len(a) - start_a, len(b) - start_b)
-    mid = max(0, (total - length) // 2)
-    seg_a = a[start_a + mid:start_a + mid + length].astype(np.float64)
-    seg_b = b[start_b + mid:start_b + mid + length].astype(np.float64)
-    fine, quality = _gcc_phat(seg_a, seg_b, int(0.05 * SYNC_RATE))
-    lag = coarse / SYNC_RATE + fine          # звук в A позже, чем в B, на lag секунд
+    if total < 2 * SYNC_RATE:
+        print("Ролики почти не перекрываются по времени, сверить не удалось", file=sys.stderr)
+        return 3
+
+    def fine_at(pos: int, length: int):
+        seg_a = a[start_a + pos:start_a + pos + length].astype(np.float64)
+        seg_b = b[start_b + pos:start_b + pos + length].astype(np.float64)
+        f, q = _gcc_phat(seg_a, seg_b, int(0.05 * SYNC_RATE))
+        return coarse / SYNC_RATE + f, q
+
+    length = min(total, 60 * SYNC_RATE)
+    lag, fine_q = fine_at((total - length) // 2, length)   # середина общего участка
+    drift = None
+    if total >= 120 * SYNC_RATE:  # начало и конец: уход часов одной камеры относительно другой
+        win = 20 * SYNC_RATE
+        (l1, q1), (l2, q2) = fine_at(5 * SYNC_RATE, win), fine_at(total - win - 5 * SYNC_RATE, win)
+        if min(q1, q2) >= 1.2 and abs(l2 - l1) < 0.05:
+            drift = (l1, l2, (total - win - 10 * SYNC_RATE) / SYNC_RATE)
+    # надёжность: сколько 30-секундных кусков B указали на тот же сдвиг, и чёткость точного пика
+    if used >= 3:
+        reliable = agree >= max(2, 0.3 * used)
+        doubtful = not reliable and agree >= 2
+    else:
+        reliable, doubtful = fine_q >= 3, fine_q >= 1.5
+    quality_text = (f"кусков по 30 с, согласных со сдвигом: {agree} из {used}; " if used >= 3 else "") + \
+        f"чёткость пика {fine_q:.1f}"
 
     infos = [_video_start(args.ffprobe, p) for p in paths]
     names = [p.name for p in paths]
@@ -489,9 +530,14 @@ def sync(args) -> int:
         fps = float(info.fps) if info.fps else 0
         if fps:
             print(f"  в кадрах {name} ({fps:.3f} кадр/с): {abs(lag) * fps:.1f}")
-    verdict = ("надёжно" if quality >= 3 else "сомнительно" if quality >= 1.5 else
+    verdict = ("надёжно" if reliable else "сомнительно" if doubtful else
                "ненадёжно: похоже, звук роликов не перекрывается")
-    print(f"Уверенность: {quality:.1f} ({verdict})")
+    print(f"Уверенность: {verdict} ({quality_text})")
+    if drift:
+        l1, l2, span = drift
+        if abs(l2 - l1) >= 0.01:
+            print(f"Часы камер немного расходятся: в начале общего участка сдвиг {l1:.3f} с, "
+                  f"через {span / 60:.0f} мин {l2:.3f} с ({(l2 - l1) / span * 1e6:+.0f} мкс/с). Выше — сдвиг в середине.")
 
     # сравнение с метаданными: какую поправку дать в --shift, чтобы avtokino поставил их точно
     est = estimate_offset([(m, n) for _, m, n, _, _ in infos], [v for *_, v in infos if v is not None])
@@ -504,7 +550,7 @@ def sync(args) -> int:
     print(f"               B {starts[1].when:%Y-%m-%d %H:%M:%S} [{starts[1].source}]")
     fix = real_diff - meta_diff
     print(f"По метаданным B начат на {meta_diff:+.2f} с относительно A, по звуку на {real_diff:+.3f} с.")
-    if quality < 1.5:
+    if not (reliable or doubtful):
         print("Сдвиг по звуку ненадёжен, поправку для --shift не предлагаю.")
     elif abs(fix) >= 0.5:
         from .dating import fmt_delta
@@ -512,7 +558,7 @@ def sync(args) -> int:
         print(f"Чтобы avtokino считал время B по часам A: --shift \"{names[1]}={fix:+.2f}\"")
     else:
         print("Часы камер расходятся меньше чем на 0,5 с, поправка не нужна.")
-    return 0 if quality >= 1.5 else 3
+    return 0 if reliable or doubtful else 3
 
 
 def _fmt_t(sec: float) -> str:
