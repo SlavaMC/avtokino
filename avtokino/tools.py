@@ -3,6 +3,7 @@
 Команды:
   trim        вырезать кусок видео без перекодировки
   timelapse   собрать ролик из последовательности фото, одно фото = один кадр
+  rotate180   перевернуть видео на 180° без перекодировки
 """
 from __future__ import annotations
 
@@ -256,6 +257,104 @@ def timelapse(args) -> int:
     return 0
 
 
+# --- rotate180 ----------------------------------------------------------------
+
+ROTATE_SUFFIX = "_rotate180"
+_MP4_LIKE = (".mp4", ".mov", ".m4v", ".3gp")
+
+
+def _expand_masks(masks: list[str]) -> list[Path]:
+    """Маски раскрываются здесь, потому что cmd.exe в Windows их не раскрывает."""
+    import glob
+    found: dict[Path, None] = {}
+    for m in masks:
+        hits = glob.glob(m, recursive=True) if glob.has_magic(m) else [m]
+        if not hits:
+            print(f"Нет файлов по маске: {m}", file=sys.stderr)
+        for h in sorted(hits):
+            p = Path(h)
+            if p.is_file():
+                found[p.resolve()] = None
+    return list(found)
+
+
+def rotate180(args) -> int:
+    from datetime import timezone
+
+    from .config import VIDEO_EXTS
+    from .dating import avchd_date
+    from .probe import ffprobe_json
+
+    files = [p for p in _expand_masks(args.masks)
+             if p.suffix.lower() in VIDEO_EXTS and not p.stem.endswith(ROTATE_SUFFIX)]
+    if not files:
+        print("Видеофайлов не найдено", file=sys.stderr)
+        return 2
+    errors = 0
+    for src in files:
+        ext = src.suffix if src.suffix.lower() in _MP4_LIKE else ".mp4"
+        out = src.with_name(f"{src.stem}{ROTATE_SUFFIX}{ext}")
+        if out.exists() and not args.force:
+            print(f"{src.name}: пропуск, уже есть {out.name} (перезаписать: --force)")
+            continue
+        try:
+            info = ffprobe_json(args.ffprobe, src)
+        except Exception as e:  # noqa: BLE001
+            print(f"{src.name}: не удалось прочитать ({e})", file=sys.stderr)
+            errors += 1
+            continue
+        video = next((st for st in info.get("streams", []) if st.get("codec_type") == "video"
+                      and not st.get("disposition", {}).get("attached_pic")), None)
+        if video is None:
+            print(f"{src.name}: нет видеопотока", file=sys.stderr)
+            errors += 1
+            continue
+        current = 0.0  # поворот в метаданных, как его показывает ffprobe (по часовой = минус)
+        for sd in video.get("side_data_list", []) or []:
+            if "rotation" in sd:
+                current = float(sd["rotation"])
+        if not current and video.get("tags", {}).get("rotate"):
+            current = -float(video["tags"]["rotate"])
+        new = (180 - current) % 360  # -display_rotation задаёт поворот против часовой стрелки
+
+        cmd = [args.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+               "-display_rotation:v:0", f"{new:g}", "-i", str(src),
+               "-map", "0:v", "-map", "0:a?", "-c", "copy", "-map_metadata", "0",
+               "-movflags", "use_metadata_tags"]
+        note = ""
+        if ext != src.suffix:
+            # В MPEG-TS/AVI/MKV нет пометки поворота, поэтому без перекодировки только смена контейнера на MP4.
+            note = f", контейнер {src.suffix} → MP4"
+            when = None
+            if src.suffix.lower() in (".mts", ".m2ts"):
+                ev = avchd_date(src)
+                if ev and ev.value.tzinfo:
+                    when = ev.value.astimezone(timezone.utc)
+            if when is None and not info.get("format", {}).get("tags", {}).get("creation_time"):
+                st = src.stat()
+                when = datetime_from_ts(getattr(st, "st_birthtime", None) or st.st_mtime)
+            if when is not None:
+                cmd += ["-metadata", "creation_time=" + when.strftime("%Y-%m-%dT%H:%M:%S.000000Z")]
+        # Потоки данных (телеметрия GoPro, таймкод) пробуем сохранить; если MP4 их не принимает, без них.
+        proc = subprocess.run(cmd + ["-map", "0:d?", str(out)], capture_output=True)
+        if proc.returncode != 0:
+            proc = subprocess.run(cmd + [str(out)], capture_output=True)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="replace").strip()
+            print(f"{src.name}: ошибка ffmpeg: {err}", file=sys.stderr)
+            out.unlink(missing_ok=True)
+            errors += 1
+            continue
+        _copy_times(src, out)
+        print(f"{src.name} → {out.name}{note}")
+    return 1 if errors else 0
+
+
+def datetime_from_ts(ts: float):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="avtokino.tools", description="Служебные команды для файлов.")
     p.add_argument("--ffmpeg", default="ffmpeg", help="путь к ffmpeg")
@@ -288,6 +387,15 @@ def main(argv: list[str] | None = None) -> int:
     tl.add_argument("--preset", default="medium", help="пресет кодировщика (medium); быстрее: veryfast")
     tl.add_argument("--vcodec", choices=["h264", "hevc"], default="h264", help="видеокодек (h264)")
     tl.set_defaults(func=timelapse)
+
+    r = sub.add_parser("rotate180", help="перевернуть видео на 180° без перекодировки",
+                       description="Переворачивает видео на 180° без перекодировки: меняется только пометка "
+                                   "поворота в контейнере, метаданные и даты файла сохраняются. Результат: "
+                                   "<имя>_rotate180.<расширение> рядом с исходником. Файлы .MTS/.AVI/.MKV "
+                                   "сохраняются в MP4, потому что в их контейнерах пометки поворота нет.")
+    r.add_argument("masks", nargs="+", metavar="МАСКА", help="файлы или маски, например *.MP4 или E:\\video\\GOPR*.MP4")
+    r.add_argument("--force", action="store_true", help="перезаписать существующий результат")
+    r.set_defaults(func=rotate180)
 
     a = p.parse_args(argv)
     if a.command == "trim" and (a.start is not None or a.end is not None) and (a.cut_start or a.cut_end):
