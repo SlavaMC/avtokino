@@ -101,6 +101,19 @@ class FrameTest(unittest.TestCase):
 
 
 
+class DurationTest(unittest.TestCase):
+    def test_formats(self):
+        from avtokino.durations import hours, parse_duration
+        self.assertEqual(parse_duration("90"), 90)
+        self.assertEqual(parse_duration("1:30"), 90)
+        self.assertEqual(parse_duration("01:02:03.5"), 3723.5)
+        self.assertEqual(parse_duration("-0:30", signed=True), -30)
+        self.assertEqual(hours("1:30"), 1.5)
+        for bad in ("1:75", "-5", "x", "1:2:3:4"):
+            with self.assertRaises(ValueError):
+                parse_duration(bad)
+
+
 class MulticamTest(unittest.TestCase):
     def test_offset(self):
         from avtokino.multicam import parse_offset

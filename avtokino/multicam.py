@@ -19,6 +19,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .config import STANDARD_FPS, VIDEO_EXTS
+from .durations import parse_duration, seconds
 from .dating import estimate_offset, resolve
 from .probe import VideoInfo
 
@@ -69,16 +70,8 @@ class Report:
 
 
 def parse_offset(value: str) -> float:
-    """«+3:07», «-187», «1:02:03.5», «+3:07.25» -> секунды (на сколько часы B отстают от A)."""
-    m = re.fullmatch(r"\s*([+-−]?)\s*(?:(\d+):)?(?:(\d+):)?(\d+(?:[.,]\d+)?)\s*", value)
-    if not m:
-        raise ValueError(f"ожидается [+|-][ЧЧ:]ММ:СС или секунды, получено: {value}")
-    sign = -1 if m[1] in ("-", "−") else 1
-    parts = [x for x in (m[2], m[3]) if x is not None]
-    sec = float(m[4].replace(",", "."))
-    for i, x in enumerate(reversed(parts)):
-        sec += int(x) * 60 ** (i + 1)
-    return sign * sec
+    """«+3:07», «-187», «1:02:03.5» -> секунды (на сколько часы B отстают от A)."""
+    return parse_duration(value, signed=True)
 
 
 def _files(n: int) -> str:
@@ -500,7 +493,7 @@ def _save_report(rep: Report, groups, args) -> None:
 
 def add_parser(sub, parse_resolution) -> None:
     m = sub.add_parser(
-        "multicam", help="общий ролик из двух камер, снимавших одновременно",
+        "multicam", epilog="Время (СЕК) можно задавать в секундах (90, 2.5) или как ЧЧ:ММ:СС / ММ:СС (01:30:00, 1:30).", help="общий ролик из двух камер, снимавших одновременно",
         description="Ищет одновременно снятые файлы камер A и B, точно сводит их по звуку и для каждой "
                     "группы пересекающихся файлов собирает ролик, где камеры чередуются. Ролик называется "
                     "по самому раннему файлу группы: <имя>_multicam_<число файлов>.mp4.")
@@ -508,9 +501,9 @@ def add_parser(sub, parse_resolution) -> None:
     m.add_argument("mask_b", metavar="МАСКА_B", help="файлы камеры B, например \"E:\\\\video\\\\SJCM*.mp4\"")
     m.add_argument("--offset", metavar="±[ЧЧ:]ММ:СС",
                    help="примерно на сколько часы B отстают от A, например +3:07; если спешат: --offset=-3:07")
-    m.add_argument("--search", type=float, default=60.0, metavar="СЕК",
+    m.add_argument("--search", type=seconds, default=60.0, metavar="СЕК",
                    help="точный сдвиг ищется в пределах ±СЕК от времени по метаданным (60)")
-    m.add_argument("--switch", type=float, default=5.0, metavar="СЕК", help="смена камеры каждые СЕК секунд (5)")
+    m.add_argument("--switch", type=seconds, default=5.0, metavar="СЕК", help="смена камеры каждые СЕК секунд (5)")
     m.add_argument("--audio", choices=["A", "B"],
                    help="звук всегда от этой камеры, когда у неё есть звук (по умолчанию от камеры на экране)")
     m.add_argument("--overlap-only", action="store_true",

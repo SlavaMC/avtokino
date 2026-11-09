@@ -112,6 +112,12 @@ python -m avtokino /data/20240615_Wedding --dry-run      # только план
 
 Полный список с описаниями: `python -m avtokino --help`.
 
+**Время в параметрах.** Везде, где параметр задаёт время в секундах (длительности, сдвиги, обрезка),
+его можно писать числом секунд или как `ЧЧ:ММ:СС` / `ММ:СС`: `90`, `2.5`, `1:30`, `01:30:00`,
+`0:00:05.5`. Где допустим сдвиг назад — со знаком: `--shift "DSC*.jpg=-1:00:00"`.
+`--date-tolerance` задаётся в часах: `6`, `1.5` или `1:30`. Это относится и ко всем командам
+`avtokino.tools`: `trim --start 1:05 --end 1:20`, `multicam --switch 0:10`, `sync --max-offset 5:00`.
+
 | Группа | Параметры (по умолчанию) |
 |---|---|
 | Видео | `--resolution 1920x1080`, `--fps 25` или `30000/1001`, `--vcodec h264\|hevc`, `--vbitrate 12M` (потолок; без него только CRF), `--crf` (h264: 20, hevc: 22), `--preset` (medium; быстрее — veryfast), `--safe` (перекодировать всё) |
@@ -150,6 +156,7 @@ python -m avtokino /data/20240615_Wedding --dry-run      # только план
 ```bash
 python -m avtokino.tools trim GOPR4745.MP4 --start 10 --end 25        # GOPR4745_trim_10-25.MP4
 python -m avtokino.tools trim GOPR4745.MP4 --start 10                 # GOPR4745_trim_10-end.MP4
+python -m avtokino.tools trim GOPR4745.MP4 --start 1:05 --end 1:20    # GOPR4745_trim_65-80.MP4
 python -m avtokino.tools trim 00082.MTS --cut-start 3                 # 00082_trim_start3.MTS
 python -m avtokino.tools trim 00082.MTS --cut-end 2                   # 00082_trim_end2.MTS
 python -m avtokino.tools trim 00082.MTS --cut-start 3 --cut-end 2     # 00082_trim_start3_end2.MTS

@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .durations import seconds
 from .probe import probe_duration
 
 
@@ -602,14 +603,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ffprobe", default="ffprobe", help="путь к ffprobe")
     sub = p.add_subparsers(dest="command", required=True)
 
-    t = sub.add_parser("trim", help="вырезать кусок видео без перекодировки",
+    t = sub.add_parser("trim", epilog="Время (СЕК) можно задавать в секундах (90, 2.5) или как ЧЧ:ММ:СС / ММ:СС (01:30:00, 1:30).", help="вырезать кусок видео без перекодировки",
                        description="Вырезает кусок видео без перекодировки, сохраняя метаданные и дату файла. "
                                    "Результат: <имя>_trim_<параметры>.<расширение> рядом с исходником.")
     t.add_argument("file", help="видеофайл")
-    t.add_argument("--start", type=float, metavar="СЕК", help="начало куска, с")
-    t.add_argument("--end", type=float, metavar="СЕК", help="конец куска, с")
-    t.add_argument("--cut-start", type=float, metavar="СЕК", help="сколько секунд отрезать от начала")
-    t.add_argument("--cut-end", type=float, metavar="СЕК", help="сколько секунд отрезать от конца")
+    t.add_argument("--start", type=seconds, metavar="СЕК", help="начало куска, с")
+    t.add_argument("--end", type=seconds, metavar="СЕК", help="конец куска, с")
+    t.add_argument("--cut-start", type=seconds, metavar="СЕК", help="сколько секунд отрезать от начала")
+    t.add_argument("--cut-end", type=seconds, metavar="СЕК", help="сколько секунд отрезать от конца")
     t.add_argument("--force", action="store_true", help="перезаписать существующий результат")
     t.set_defaults(func=trim)
 
@@ -638,15 +639,15 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--force", action="store_true", help="перезаписать существующий результат")
     r.set_defaults(func=rotate180)
 
-    sy = sub.add_parser("sync", help="рассинхронизация двух роликов с разных камер по звуку",
+    sy = sub.add_parser("sync", epilog="Время (СЕК) можно задавать в секундах (90, 2.5) или как ЧЧ:ММ:СС / ММ:СС (01:30:00, 1:30).", help="рассинхронизация двух роликов с разных камер по звуку",
                         description="Находит, на сколько сдвинуты друг относительно друга два ролика, снятые "
                                     "одновременно разными камерами: сравнивает их звук. Точность лучше 0,01 с. "
                                     "Также сравнивает результат с датами съёмки и подсказывает --shift для avtokino.")
     sy.add_argument("a", help="первый ролик (A)")
     sy.add_argument("b", help="второй ролик (B)")
-    sy.add_argument("--max-offset", type=float, metavar="СЕК",
+    sy.add_argument("--max-offset", type=seconds, metavar="СЕК",
                     help="искать сдвиг не больше СЕК секунд (по умолчанию любой)")
-    sy.add_argument("--max-duration", type=float, metavar="СЕК",
+    sy.add_argument("--max-duration", type=seconds, metavar="СЕК",
                     help="читать только первые СЕК секунд звука каждого ролика (для очень длинных файлов)")
     sy.set_defaults(func=sync)
 

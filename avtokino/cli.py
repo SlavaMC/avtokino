@@ -18,6 +18,7 @@ from pathlib import Path
 from . import __version__
 from .assemble import build_music, concat_audio, mix_audio, mux
 from .config import IGNORED_NAMES, PHOTO_EXTS, VIDEO_EXTS, Settings
+from .durations import hours, parse_duration, seconds
 from .dating import check_utc, fmt_delta, parse_time_fix, estimate_offset, fs_date, name_date, photo_meta, resolve, video_meta
 from .naming import choose_output, output_pattern, parse_dir_name
 from .planner import Item, build_plan, choose_base, fps_str, gopro_trim
@@ -55,10 +56,15 @@ def _time_fix(value: str):
 
 
 def _shift(value: str) -> tuple[str, float]:
-    m = re.fullmatch(r"\s*(.+?)\s*=\s*([+-]?\d+(?:\.\d+)?)\s*", value)
-    if not m:
-        raise argparse.ArgumentTypeError(f"ожидается «МАСКА=СЕКУНДЫ», например «DSC*.jpg=-3600», получено: {value}")
-    return m[1].replace("\\", "/"), float(m[2])
+    m = re.fullmatch(r"\s*(.+)=\s*([^=]+?)\s*", value)
+    try:
+        if not m:
+            raise ValueError
+        sec = parse_duration(m[2], signed=True)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"ожидается «МАСКА=СЕКУНДЫ» или «МАСКА=ЧЧ:ММ:СС», например "
+                                         f"«DSC*.jpg=-3600» или «DSC*.jpg=-1:00:00», получено: {value}") from None
+    return m[1].strip().replace("\\", "/"), sec
 
 
 def shift_for(rel: str, shifts: list[tuple[str, float]]) -> tuple[str, float] | None:
@@ -78,7 +84,7 @@ def _fps(value: str) -> Fraction:
 
 
 def parse_args(argv: list[str] | None = None) -> Settings:
-    p = argparse.ArgumentParser(prog="avtokino",
+    p = argparse.ArgumentParser(prog="avtokino", epilog="Время (СЕК) можно задавать в секундах (90, 2.5) или как ЧЧ:ММ:СС / ММ:СС (01:30:00, 1:30). ЧАСЫ — числом (6, 1.5) или ЧЧ:ММ.",
                                 description="Собирает видеоролик из фото и видео рабочего каталога.")
     p.add_argument("workdir", type=Path, help="каталог события, например 20240615_Wedding")
     g = p.add_argument_group("видео")
@@ -98,29 +104,29 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--volume", type=float, default=1.0, help="громкость основного звука (1.0)")
     g.add_argument("--music", type=Path, help="каталог с фоновой музыкой")
     g.add_argument("--music-volume", type=float, default=0.3, help="громкость музыки (0.3)")
-    g.add_argument("--music-crossfade", type=float, default=3.0, help="перекрытие треков, с (3)")
+    g.add_argument("--music-crossfade", type=seconds, metavar="СЕК", default=3.0, help="перекрытие треков, с (3)")
     g.add_argument("--music-shuffle", action="store_true", help="брать треки в случайном порядке")
-    g.add_argument("--music-fadeout", type=float, default=5.0, help="затухание музыки в конце, с (5)")
+    g.add_argument("--music-fadeout", type=seconds, metavar="СЕК", default=5.0, help="затухание музыки в конце, с (5)")
     g.add_argument("--no-ducking", action="store_true", help="не приглушать музыку под живым звуком")
     g = p.add_argument_group("фото и монтаж")
-    g.add_argument("--photo-duration", type=float, default=5.0, help="длительность фото, с (5)")
-    g.add_argument("--photo-burst-duration", type=float, default=3.0, help="длительность фото в серии, с (3)")
+    g.add_argument("--photo-duration", type=seconds, metavar="СЕК", default=5.0, help="длительность фото, с (5)")
+    g.add_argument("--photo-burst-duration", type=seconds, metavar="СЕК", default=3.0, help="длительность фото в серии, с (3)")
     g.add_argument("--photo-burst-threshold", type=int, default=5,
                    help="серия = больше стольких фото подряд (5)")
     g.add_argument("--photo-zoom", type=float, default=1.05, help="зум фото за кадр (1.05 = 5%%)")
     g.add_argument("--exclude", action="append", metavar="КАТАЛОГ",
                    help="не обрабатывать каталог: имя на любом уровне (Черновики), путь от рабочего "
                         "каталога (Mobile/Screenshots) или маска (*_old); можно указать несколько раз")
-    g.add_argument("--long-video", type=float, default=60.0, metavar="СЕК",
+    g.add_argument("--long-video", type=seconds, default=60.0, metavar="СЕК",
                    help="в логе отдельно перечислить видео длиннее СЕК секунд (по умолчанию 60, 0 = не выводить)")
-    g.add_argument("--min-clip", type=float, default=5.0,
+    g.add_argument("--min-clip", type=seconds, metavar="СЕК", default=5.0,
                    help="пропускать видео короче, с (5); для GoPro считается после обрезки")
-    g.add_argument("--gopro-trim", type=float, nargs="?", const=3.0, default=0.0, metavar="СЕК",
+    g.add_argument("--gopro-trim", type=seconds, nargs="?", const=3.0, default=0.0, metavar="СЕК",
                    help="отрезать конец у роликов GoPro (GOPR*, GP*, GH*, GX*); без числа — 3 с")
     g.add_argument("--photo-fit", choices=["contain", "cover"], default="contain",
                    help="фото: contain — целиком с чёрными полями, cover — на весь кадр с обрезкой "
                         "(вертикальные фото всегда целиком)")
-    g.add_argument("--date-tolerance", type=float, default=6.0, metavar="ЧАСЫ",
+    g.add_argument("--date-tolerance", type=hours, default=6.0, metavar="ЧАСЫ",
                    help="запас вокруг периода из имени каталога; файлы за его пределами идут в конец (6)")
     g.add_argument("--time-fix", action="append", type=_time_fix, metavar="'БЫЛО -> СТАЛО'",
                    help="поправка сбитых часов: \"2016-01-04 23:02:42 -> 2025-06-20 09:48:00\"; "
@@ -133,17 +139,17 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--tz", help="часовой пояс съёмки (Europe/Moscow или +03:00), если не определился сам")
     g.add_argument("--transition", choices=["none", "fade"], default="none",
                    help="переходы: fade = через чёрное (требует перекодировки всех клипов)")
-    g.add_argument("--transition-duration", type=float, default=0.5, help="длительность перехода, с")
+    g.add_argument("--transition-duration", type=seconds, metavar="СЕК", default=0.5, help="длительность перехода, с")
     g.add_argument("--title", action="store_true", help="титр с названием и датой события в начале")
     g.add_argument("--title-text", action="append", metavar="СТРОКА",
                    help="свой текст титра; каждая --title-text — отдельная строка, первая крупнее "
                         "(включает титр)")
-    g.add_argument("--title-duration", type=float, default=4.0, metavar="СЕК", help="длительность титра, с (4)")
+    g.add_argument("--title-duration", type=seconds, default=4.0, metavar="СЕК", help="длительность титра, с (4)")
     g.add_argument("--caption", action="store_true",
                    help="подпись (название и дата) в правом нижнем углу в начале ролика")
     g.add_argument("--caption-name", metavar="ТЕКСТ", help="первая строка подписи (по умолчанию из имени каталога)")
     g.add_argument("--caption-date", metavar="ТЕКСТ", help="вторая строка подписи (по умолчанию из даты каталога)")
-    g.add_argument("--caption-duration", type=float, default=10.0, metavar="СЕК",
+    g.add_argument("--caption-duration", type=seconds, default=10.0, metavar="СЕК",
                    help="сколько секунд от начала показывать подпись (10)")
     g.add_argument("--caption-font", metavar="ФАЙЛ", help="шрифт подписи (.ttf), например Roboto-Regular.ttf")
     g = p.add_argument_group("работа")
