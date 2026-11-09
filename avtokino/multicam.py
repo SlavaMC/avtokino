@@ -88,6 +88,8 @@ def _files(n: int) -> str:
 
 
 def _fmt_clock(sec: float) -> str:
+    if abs(sec) < 0.005:
+        sec = 0.0
     sign = "−" if sec < 0 else ""
     sec = abs(sec)
     h, rest = divmod(sec, 3600)
@@ -133,57 +135,78 @@ def _components(clips: list[Clip], edges: list[tuple[Clip, Clip, float]]) -> lis
 
 def _plan(group: list[Clip], switch: float, fps: Fraction, audio_cam: str | None,
           overlap_only: bool) -> list[Piece]:
+    """Монтаж группы. Время раскладывается по кадрам; там, где снимают обе камеры, они чередуются
+    каждые switch секунд, причём отсчёт начинается заново с момента, когда появилась вторая камера,
+    и первой показывается только что появившаяся."""
     frame = 1 / float(fps)
 
-    def snap(t: float) -> float:
-        return round(t / frame) * frame
+    def snap(t: float) -> int:          # время -> номер кадра
+        return int(round(t / frame))
 
-    end = max(c.start + c.duration for c in group)
-    cuts = {0.0, snap(end)}
-    for c in group:
-        cuts.add(snap(c.start))
-        cuts.add(snap(c.start + c.duration))
-    k = switch
-    while k < end:
-        cuts.add(snap(k))
-        k += switch
-    cuts = sorted(t for t in cuts if 0 <= t <= snap(end))
-
-    def at(cam: str, t0: float, t1: float) -> Clip | None:
-        """Файл камеры, который покрывает весь отрезок (с запасом в полкадра)."""
+    def at(cam: str, f0: int, f1: int) -> Clip | None:
+        """Файл камеры, который покрывает весь отрезок кадров [f0, f1)."""
         for c in group:
-            if c.cam == cam and c.start - frame / 2 <= t0 and c.start + c.duration + frame / 2 >= t1:
+            if c.cam == cam and snap(c.start) <= f0 and snap(c.start + c.duration) >= f1:
                 return c
         return None
 
+    end = snap(max(c.start + c.duration for c in group))
+    bounds = sorted({0, end} | {min(end, max(0, snap(t))) for c in group
+                                for t in (c.start, c.start + c.duration)})
+    step = max(1, snap(switch))
+    # 1) какие камеры доступны на каждом отрезке между краями файлов; 2) куда переключаться
+    slots: list[tuple[int, int, str]] = []        # (кадр начала, кадр конца, камера на экране)
+    shown = None
+    run_start = None                               # начало текущего участка, где снимают обе камеры
+    first = None
+    for f0, f1 in zip(bounds, bounds[1:]):
+        if f1 <= f0:
+            continue
+        has = {cam: at(cam, f0, f1) is not None for cam in "AB"}
+        if has["A"] and has["B"]:
+            if run_start is None:                  # вторая камера только что появилась: показываем её
+                run_start = f0
+                first = "A" if shown is None else ("B" if shown == "A" else "A")
+            f = f0
+            while f < f1:
+                k = (f - run_start) // step
+                g = min(f1, run_start + (k + 1) * step)
+                cam = first if k % 2 == 0 else ("B" if first == "A" else "A")
+                slots.append((f, g, cam))
+                shown = cam
+                f = g
+        else:
+            run_start = None
+            if overlap_only:
+                continue
+            cam = "A" if has["A"] else "B" if has["B"] else None
+            if cam:
+                slots.append((f0, f1, cam))
+                shown = cam
+
     pieces: list[Piece] = []
-    for t0, t1 in zip(cuts, cuts[1:]):
-        if t1 - t0 < frame / 2:
-            continue
-        want = "A" if int((t0 + 1e-6) // switch) % 2 == 0 else "B"
-        clips = {cam: at(cam, t0, t1) for cam in "AB"}
-        if overlap_only and not (clips["A"] and clips["B"]):
-            continue
-        video = clips[want] or clips["B" if want == "A" else "A"]
-        if video is None:
-            continue
+    for f0, f1, cam in slots:
+        video = at(cam, f0, f1)
+        other = at("B" if cam == "A" else "A", f0, f1)
         audio = video
-        if audio_cam and clips[audio_cam] and clips[audio_cam].has_audio:
-            audio = clips[audio_cam]
+        if audio_cam:
+            forced = video if video.cam == audio_cam else other
+            if forced is not None and forced.has_audio:
+                audio = forced
         if not audio.has_audio:
-            other = clips["B" if audio.cam == "A" else "A"]
-            audio = other if other and other.has_audio else None
+            audio = other if other is not None and other.has_audio else None
+        t0, t1 = f0 * frame, f1 * frame
         last = pieces[-1] if pieces else None
-        if last and last.video is video and last.audio is audio and abs(last.t1 - t0) < 1e-6:
+        if last and last.video is video and last.audio is audio and abs(last.t1 - t0) < frame / 2:
             last.t1 = t1
         else:
             pieces.append(Piece(t0, t1, video, audio))
-    # слишком короткие куски (меньше 0,5 с) из-за краёв файлов сливаем с предыдущим, если он может продолжиться
+    # слишком короткие куски (меньше 0,5 с) у краёв файлов сливаем с предыдущим, если тот может продолжиться
     merged: list[Piece] = []
     for p in pieces:
         prev = merged[-1] if merged else None
-        if (prev and p.t1 - p.t0 < 0.5 and abs(prev.t1 - p.t0) < 1e-6
-                and prev.video.start + prev.video.duration + frame / 2 >= p.t1):
+        if (prev and p.t1 - p.t0 < 0.5 and abs(prev.t1 - p.t0) < frame / 2
+                and snap(prev.video.start + prev.video.duration) >= snap(p.t1)):
             prev.t1 = p.t1
         else:
             merged.append(p)

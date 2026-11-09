@@ -119,7 +119,12 @@ class MulticamTest(unittest.TestCase):
         a, b = clip("A", 0, 20), clip("B", 7, 20)
         pieces = _plan([a, b], 5, Fraction(25), None, False)
         self.assertEqual([(p.t0, p.t1, p.video.cam) for p in pieces],
-                         [(0, 7, "A"), (7, 10, "B"), (10, 15, "A"), (15, 27, "B")])
+                         [(0, 7, "A"), (7, 12, "B"), (12, 17, "A"), (17, 27, "B")])
+        # граница переключения не должна «съезжать» из-за округления до кадра (59,94 кадр/с)
+        odd = _plan([clip("B", 0, 168), clip("A", 43.47, 92)], 5, Fraction(60000, 1001), None, False)
+        lens = [round(p.t1 - p.t0, 2) for p in odd[1:-2]]
+        self.assertTrue(all(abs(x - 5) < 0.02 for x in lens), lens)
+        self.assertEqual(odd[1].video.cam, "A")
         only = _plan([a, b], 5, Fraction(25), "A", True)
         self.assertEqual(only[0].t0, 7)
         self.assertTrue(all(p.audio is a for p in only))
