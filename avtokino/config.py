@@ -23,6 +23,7 @@ DEFAULT_CRF = {"h264": 20, "hevc": 22}
 class Settings:
     workdir: Path
     resolution: tuple[int, int] | None = None
+    aspect: tuple[int, int] | None = None     # соотношение сторон кадра, например (4, 3)
     fps: Fraction | None = None
     vcodec: str | None = None
     vbitrate: int | None = None          # бит/с, потолок; None = только CRF

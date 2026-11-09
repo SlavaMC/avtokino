@@ -79,25 +79,43 @@ def _even(x: float) -> int:
     return int(round(x / 2)) * 2
 
 
-def frame_16x9(w: int, h: int) -> tuple[int, int]:
-    """Кадр 16:9, в который вписывается видео; вертикальное видео даёт горизонтальный кадр той же высоты по короткой стороне."""
-    long_side, short_side = max(w, h), min(w, h)
-    if long_side * 9 >= short_side * 16:
-        return _even(long_side), _even(long_side * 9 / 16)
-    return _even(short_side * 16 / 9), _even(short_side)
+def aspect_frame(w: int, h: int, aw: int, ah: int) -> tuple[int, int]:
+    """Наименьший кадр с соотношением aw:ah, в который видео w×h входит без уменьшения
+    (кадр достраивается полями сверху-снизу или по бокам)."""
+    if w * ah >= h * aw:                 # видео шире нужного: достраиваем высоту
+        return _even(w), _even(w * ah / aw)
+    return _even(h * aw / ah), _even(h)
+
+
+def ratio_str(w: int, h: int) -> str:
+    g = gcd(w, h)
+    if w // g <= 32 and h // g <= 32:
+        return f"{w // g}:{h // g}"
+    for a, b in ((16, 9), (4, 3), (3, 2), (21, 9), (1, 1), (9, 16), (3, 4)):
+        if abs(w / h - a / b) < 0.01:
+            return f"≈{a}:{b}"
+    return f"{w / h:.2f}:1"
 
 
 def choose_base(videos: list[VideoInfo], s: Settings) -> Base:
-    src = max(videos, key=lambda v: (v.width * v.height, v.duration)) if videos else None
+    # Основа — самое большое горизонтальное видео; вертикальное — только если горизонтальных нет.
+    horizontal = [v for v in videos if v.width >= v.height]
+    pool = horizontal or videos
+    src = max(pool, key=lambda v: (v.width * v.height, v.duration)) if pool else None
     notes = []
     if s.resolution:
         w, h = s.resolution
         notes.append("разрешение из командной строки")
     elif src:
-        w, h = frame_16x9(src.width, src.height)
-        notes.append(f"разрешение по файлу {src.path.name} ({src.resolution})")
+        if s.aspect:
+            w, h = aspect_frame(src.width, src.height, *s.aspect)
+            notes.append(f"разрешение по файлу {src.path.name} ({src.resolution}), "
+                         f"достроено до {s.aspect[0]}:{s.aspect[1]}")
+        else:
+            w, h = _even(src.width), _even(src.height)
+            notes.append(f"разрешение по файлу {src.path.name} ({src.resolution})")
     else:
-        w, h = 1920, 1080
+        w, h = aspect_frame(1920, 1080, *s.aspect) if s.aspect else (1920, 1080)
         notes.append("видео нет, разрешение по умолчанию")
 
     if s.fps:
@@ -129,13 +147,12 @@ def _fps_close(a: Fraction, b: Fraction) -> bool:
 
 
 def _aspect_note(w: int, h: int, base: Base) -> str | None:
-    if w * base.height == h * base.width:
-        return None
-    g = gcd(w, h)
-    ratio = f"{w // g}:{h // g}" if w // g <= 32 else f"{w / h:.2f}:1"
+    if abs(w * base.height - h * base.width) <= 0.005 * h * base.width:
+        return None   # разница меньше 0,5% (округление до чётных пикселей) — поля в пару пикселей не в счёт
+    ratio, target = ratio_str(w, h), ratio_str(base.width, base.height)
     if w * base.height > h * base.width:
-        return f"соотношение {ratio} ≠ 16:9, поля сверху и снизу"
-    return f"соотношение {ratio} ≠ 16:9, поля по бокам"
+        return f"соотношение {ratio} ≠ {target}, поля сверху и снизу"
+    return f"соотношение {ratio} ≠ {target}, поля по бокам"
 
 
 def plan_video(v: VideoInfo, base: Base, s: Settings) -> tuple[str, list[str]]:
@@ -230,7 +247,7 @@ def build_plan(items: list[Item], base: Base, s: Settings) -> list[Segment]:
             note = _aspect_note(p.width, p.height, base)
             if note:
                 if cover:
-                    note = note.split(",")[0] + ", обрезка до 16:9 на весь кадр"
+                    note = note.split(",")[0] + f", обрезка до {ratio_str(base.width, base.height)} на весь кадр"
                 seg.actions.append(note)
             direction = "приближение" if seg.zoom_in else "отдаление"
             seg.actions.append(f"плавный зум {int(round((s.photo_zoom - 1) * 100))}% ({direction})")

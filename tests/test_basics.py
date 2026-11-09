@@ -4,7 +4,7 @@ from pathlib import Path
 
 from avtokino.dating import Evidence, estimate_offset, name_date, parse_time_fix, resolve
 from avtokino.naming import is_gopro, output_pattern, parse_dir_name
-from avtokino.planner import frame_16x9
+from avtokino.planner import aspect_frame, ratio_str
 
 
 class DirNameTest(unittest.TestCase):
@@ -94,10 +94,12 @@ class ShiftTest(unittest.TestCase):
 
 class FrameTest(unittest.TestCase):
     def test_frame(self):
-        self.assertEqual(frame_16x9(1920, 1080), (1920, 1080))
-        self.assertEqual(frame_16x9(1080, 1920), (1920, 1080))
-        self.assertEqual(frame_16x9(1440, 1080), (1920, 1080))
-        self.assertEqual(frame_16x9(3840, 2160), (3840, 2160))
+        self.assertEqual(aspect_frame(1920, 1080, 16, 9), (1920, 1080))
+        self.assertEqual(aspect_frame(2704, 2028, 16, 9), (3606, 2028))
+        self.assertEqual(aspect_frame(1920, 1080, 4, 3), (1920, 1440))
+        self.assertEqual(aspect_frame(1080, 1920, 16, 9), (3414, 1920))
+        self.assertEqual(ratio_str(2704, 2028), "4:3")
+        self.assertEqual(ratio_str(3606, 2028), "≈16:9")
 
 
 

@@ -21,7 +21,7 @@ from .config import IGNORED_NAMES, PHOTO_EXTS, VIDEO_EXTS, Settings
 from .durations import hours, parse_duration, seconds
 from .dating import check_utc, fmt_delta, parse_time_fix, estimate_offset, fs_date, name_date, photo_meta, resolve, video_meta
 from .naming import choose_output, output_pattern, parse_dir_name
-from .planner import Item, build_plan, choose_base, fps_str, gopro_trim
+from .planner import Item, build_plan, choose_base, fps_str, gopro_trim, ratio_str
 from .probe import HEIF_SUPPORTED, probe_photo, probe_video
 from .render import RenderContext, has_filter, make_caption, render_segment
 
@@ -43,9 +43,20 @@ def _resolution(value: str) -> tuple[int, int]:
     if not m:
         raise argparse.ArgumentTypeError(f"разрешение: {value}, нужно, например, 1920x1080")
     w, h = int(m[1]), int(m[2])
-    if w * 9 != h * 16:
-        raise argparse.ArgumentTypeError("разрешение должно быть 16:9")
-    return w, h
+    if w < 16 or h < 16:
+        raise argparse.ArgumentTypeError(f"слишком маленькое разрешение: {value}")
+    return w // 2 * 2, h // 2 * 2   # для yuv420p нужны чётные размеры
+
+
+def _aspect(value: str) -> tuple[int, int]:
+    m = re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s*[:xX/]\s*(\d+(?:[.,]\d+)?)\s*", value)
+    if not m:
+        raise argparse.ArgumentTypeError(f"соотношение сторон: {value}, нужно, например, 16:9 или 4:3")
+    a, b = (Fraction(x.replace(",", ".")) for x in (m[1], m[2]))
+    if a <= 0 or b <= 0:
+        raise argparse.ArgumentTypeError(f"соотношение сторон: {value}")
+    r = (a / b).limit_denominator(1000)
+    return r.numerator, r.denominator
 
 
 def _time_fix(value: str):
@@ -88,7 +99,12 @@ def parse_args(argv: list[str] | None = None) -> Settings:
                                 description="Собирает видеоролик из фото и видео рабочего каталога.")
     p.add_argument("workdir", type=Path, help="каталог события, например 20240615_Wedding")
     g = p.add_argument_group("видео")
-    g.add_argument("--resolution", type=_resolution, help="базовое разрешение 16:9, например 1920x1080")
+    g.add_argument("--resolution", type=_resolution, metavar="ШxВ",
+                   help="точное разрешение ролика, например 1920x1080 или 2704:2028 (по умолчанию как у самого "
+                        "большого горизонтального видео); остальное вписывается с чёрными полями")
+    g.add_argument("--aspect", type=_aspect, metavar="Ш:В",
+                   help="соотношение сторон, например 16:9 или 4:3: кадр самого большого видео достраивается "
+                        "до него полями (без уменьшения); вместе с --resolution не используется")
     g.add_argument("--fps", type=_fps, help="базовая частота кадров, например 25 или 30000/1001")
     g.add_argument("--vcodec", choices=["h264", "hevc"], help="базовый кодек")
     g.add_argument("--vbitrate", type=_bitrate,
@@ -162,8 +178,10 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("-v", "--verbose", action="store_true", help="подробный вывод в консоль")
     p.add_argument("--version", action="version", version=f"avtokino {__version__}")
     a = p.parse_args(argv)
+    if a.resolution and a.aspect:
+        p.error("--resolution и --aspect вместе не используются: разрешение уже задаёт соотношение сторон")
     return Settings(
-        workdir=a.workdir.resolve(), resolution=a.resolution, fps=a.fps, vcodec=a.vcodec,
+        workdir=a.workdir.resolve(), resolution=a.resolution, aspect=a.aspect, fps=a.fps, vcodec=a.vcodec,
         vbitrate=a.vbitrate, crf=a.crf, preset=a.preset, acodec=a.acodec, abitrate=a.abitrate,
         arate=a.arate, achannels=a.achannels, volume=a.volume,
         music_dir=a.music.resolve() if a.music else None, music_volume=a.music_volume,
@@ -405,7 +423,8 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     log.info("")
     log.info("--- Базовые параметры ---")
     log.info("Разрешение:      %s", base.resolution)
-    log.info("Соотношение:     16:9 (несовпадающий контент вписывается с чёрными полями)")
+    log.info("Соотношение:     %s (несовпадающий контент вписывается с чёрными полями)",
+             ratio_str(base.width, base.height))
     log.info("Видеокодек:      %s (CRF %d, пресет %s)", base.vcodec, base.crf, s.preset)
     log.info("Частота кадров:  %s", fps_str(base.fps))
     log.info("Видеобитрейт:    %s", f"≤ {base.vbitrate // 1000} кбит/с" if base.vbitrate
