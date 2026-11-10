@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,11 +30,14 @@ def _num(x: float) -> str:
 def _copy_times(src: Path, dst: Path) -> None:
     """Даты файла как у исходника: изменение и доступ, а в Windows ещё и создание."""
     st = src.stat()
-    os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
-    if os.name != "nt":
-        return
-    birth = getattr(st, "st_birthtime_ns", None) or int(getattr(st, "st_ctime", 0) * 1e9)
-    if not birth:
+    birth = getattr(st, "st_birthtime_ns", None) or (int(st.st_ctime * 1e9) if os.name == "nt" else None)
+    _set_times(dst, st.st_mtime_ns, birth, st.st_atime_ns)
+
+
+def _set_times(dst: Path, mtime_ns: int, birth_ns: int | None = None, atime_ns: int | None = None) -> None:
+    """Время изменения (и доступа) файла; в Windows ещё и время создания."""
+    os.utime(dst, ns=(atime_ns if atime_ns is not None else mtime_ns, mtime_ns))
+    if os.name != "nt" or not birth_ns:
         return
     import ctypes
     from ctypes import wintypes
@@ -46,11 +50,48 @@ def _copy_times(src: Path, dst: Path) -> None:
     if h in (None, wintypes.HANDLE(-1).value):
         return
     try:
-        ft = birth // 100 + 116444736000000000  # FILETIME: сотни нс от 1601 года
+        ft = birth_ns // 100 + 116444736000000000  # FILETIME: сотни нс от 1601 года
         ctime = wintypes.FILETIME(ft & 0xFFFFFFFF, ft >> 32)
         k32.SetFileTime(h, ctypes.byref(ctime), None, None)
     finally:
         k32.CloseHandle(h)
+
+
+def _mmss(t: float) -> str:
+    """75.5 -> «01m15.5», 10 -> «00m10»: время для имени файла."""
+    m, sec = divmod(round(t, 2), 60)
+    if abs(sec - round(sec)) < 0.005:
+        return f"{int(m):02d}m{int(round(sec)):02d}"
+    return f"{int(m):02d}m" + f"{sec:05.2f}".rstrip("0")
+
+
+def _parse_range(value: str) -> tuple[float, float | None]:
+    """«10-25», «1:05-1:20», «0:30-» или «0:30-end» -> (начало, конец или None = до конца)."""
+    from .durations import parse_duration
+    m = re.fullmatch(r"\s*([^-\s]+)\s*-\s*([^-\s]*)\s*", value)
+    if not m:
+        raise argparse.ArgumentTypeError(f"кусок: ожидается НАЧАЛО-КОНЕЦ, например 10-25 или 1:05-1:20, получено: {value}")
+    try:
+        start = parse_duration(m[1])
+        end = None if m[2] in ("", "end", "конец") else parse_duration(m[2])
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"кусок {value}: {e}") from None
+    if end is not None and end <= start:
+        raise argparse.ArgumentTypeError(f"кусок {value}: конец должен быть позже начала")
+    return start, end
+
+
+def _shift_iso(value: str, delta: float) -> str | None:
+    """Метка времени из метаданных + delta секунд, в том же виде (с «Z» или со смещением)."""
+    from datetime import timedelta
+    from .dating import _parse_iso
+    dt = _parse_iso(value)
+    if dt is None:
+        return None
+    dt += timedelta(seconds=delta)
+    if value.strip().endswith("Z") or (dt.tzinfo and dt.utcoffset() == timedelta(0) and "+" not in value[10:]):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "000Z"
+    return dt.isoformat()
 
 
 def trim(args) -> int:
@@ -58,66 +99,128 @@ def trim(args) -> int:
     if not src.is_file():
         print(f"Файл не найден: {src}", file=sys.stderr)
         return 2
-    duration = probe_duration(args.ffprobe, src)
+    try:
+        info = ffprobe_json_safe(args.ffprobe, src)
+    except RuntimeError as e:
+        print(f"Не удалось прочитать {src.name}: {e}", file=sys.stderr)
+        return 2
+    duration = float(info.get("format", {}).get("duration") or 0)
     if duration <= 0:
         print(f"Не удалось определить длительность: {src.name}", file=sys.stderr)
         return 2
 
-    if args.start is not None or args.end is not None:
-        start = args.start or 0.0
-        end = args.end if args.end is not None else duration
-        tag = f"{_num(start)}-{_num(end) if args.end is not None else 'end'}"
-    else:
-        start = args.cut_start or 0.0
-        end = duration - (args.cut_end or 0.0)
-        parts = ([f"start{_num(args.cut_start)}"] if args.cut_start else []) + \
-                ([f"end{_num(args.cut_end)}"] if args.cut_end else [])
-        tag = "_".join(parts)
-    end = min(end, duration)
-    if not tag:
-        print("Укажите --start/--end или --cut-start/--cut-end", file=sys.stderr)
-        return 2
-    if start < 0 or end <= start:
-        print(f"Неверный интервал: {start:g}–{end:g} с (длительность файла {duration:.2f} с)", file=sys.stderr)
+    # куски: (начало, конец, метка для имени)
+    pieces: list[tuple[float, float, str]] = []
+    for st_, en in list(args.ranges or []) + ([(args.start or 0.0, args.end)] if args.start is not None
+                                              or args.end is not None else []):
+        pieces.append((st_, min(en, duration) if en is not None else duration,
+                       f"{_mmss(st_)}-{_mmss(en) if en is not None else 'end'}"))
+    if args.cut_start or args.cut_end:
+        tag = "_".join(([f"start{_mmss(args.cut_start)}"] if args.cut_start else []) +
+                       ([f"end{_mmss(args.cut_end)}"] if args.cut_end else []))
+        pieces.append((args.cut_start or 0.0, duration - (args.cut_end or 0.0), tag))
+    if not pieces:
+        print("Укажите куски (например 10-25 1:05-1:20), --start/--end или --cut-start/--cut-end", file=sys.stderr)
         return 2
 
-    out = src.with_name(f"{src.stem}_trim_{tag}{src.suffix}")
-    if out.exists() and not args.force:
-        print(f"Файл уже существует: {out.name} (перезаписать: --force)", file=sys.stderr)
-        return 2
-
-    base = [args.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
-    if start > 0:
-        base += ["-ss", f"{start:.3f}"]
-    base += ["-i", str(src), "-t", f"{end - start:.3f}"]
-    tail = ["-c", "copy", "-map_metadata", "0", "-avoid_negative_ts", "make_zero"]
+    # исходные даты: метаданные и дата файла (у камер это конец записи)
+    st = src.stat()
+    fmt_tags = info.get("format", {}).get("tags", {}) or {}
+    stream_tags = [(i, (s_.get("tags") or {})) for i, s_ in enumerate(info.get("streams", []))]
     ext = src.suffix.lower()
-    if ext in (".mp4", ".mov", ".m4v"):
-        tail += ["-movflags", "use_metadata_tags"]
-    # Сначала со всеми потоками (данные GoPro, таймкод); если контейнер их не принимает — только видео и звук.
-    # Субтитры PGS в .MTS (наложение даты у Sony) ffmpeg в MPEG-TS записать не умеет, их пропускаем.
-    first = ["-map", "0"] + (["-map", "-0:s"] if ext in (".mts", ".m2ts", ".ts") else [])
-    attempts = [first, ["-map", "0:v", "-map", "0:a?"]]
-    err = ""
-    for maps in attempts:
-        proc = subprocess.run(base + maps + tail + [str(out)], capture_output=True)
-        if proc.returncode == 0:
-            break
-        err = proc.stderr.decode("utf-8", errors="replace").strip()
-    else:
-        print(f"Ошибка ffmpeg: {err}", file=sys.stderr)
-        return 1
+    rc = 0
+    for start, end, tag in pieces:
+        if start < 0 or end <= start or start >= duration:
+            print(f"Пропуск {tag}: неверный интервал {start:g}–{end:g} с (длительность файла {duration:.2f} с)",
+                  file=sys.stderr)
+            rc = 2
+            continue
+        out = src.with_name(f"{src.stem}_trim_{tag}{src.suffix}")
+        if out.exists() and not args.force:
+            print(f"Пропуск {out.name}: файл уже существует (перезаписать: --force)", file=sys.stderr)
+            rc = 2
+            continue
+        base = [args.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
+        if start > 0:
+            base += ["-ss", f"{start:.3f}"]
+        base += ["-i", str(src), "-t", f"{end - start:.3f}"]
+        tail = ["-c", "copy", "-map_metadata", "0", "-avoid_negative_ts", "make_zero"]
+        if ext in (".mp4", ".mov", ".m4v"):
+            tail += ["-movflags", "use_metadata_tags"]
+        # Сначала со всеми потоками (данные GoPro, таймкод); если контейнер их не принимает — только видео и звук.
+        # Субтитры PGS в .MTS (наложение даты у Sony) ffmpeg в MPEG-TS записать не умеет, их пропускаем.
+        first = ["-map", "0"] + (["-map", "-0:s"] if ext in (".mts", ".m2ts", ".ts") else [])
+        attempts = [first, ["-map", "0:v", "-map", "0:a?"]]
+        err = ""
+        for maps in attempts:
+            proc = subprocess.run(base + maps + tail + [str(out)], capture_output=True)
+            if proc.returncode == 0:
+                break
+            err = proc.stderr.decode("utf-8", errors="replace").strip()
+        else:
+            print(f"{tag}: ошибка ffmpeg: {err}", file=sys.stderr)
+            rc = 1
+            continue
+        real = probe_duration(args.ffprobe, out)
+        early = max(0.0, real - (end - start)) if start > 0 else 0.0  # начало с ключевого кадра
+        real_start = max(0.0, start - early)
 
-    _copy_times(src, out)
-    real = probe_duration(args.ffprobe, out)
-    early = real - (end - start)  # без перекодировки кусок начинается с ключевого кадра
-    print(f"Готово: {out.name}")
-    print(f"  запрошено: {start:.2f}–{end:.2f} с ({end - start:.2f} с)")
-    if start > 0 and early > 0.1:
-        print(f"  без перекодировки кусок начинается с ближайшего ключевого кадра, "
-              f"примерно на {early:.2f} с раньше ({max(0.0, start - early):.2f} с)")
-    print(f"  длительность результата: {real:.2f} с")
-    return 0
+        # даты: метаданные исходника + время начала куска
+        notes = []
+        meta_args = []
+        ct = fmt_tags.get("creation_time")
+        if ct and real_start > 0:
+            new = _shift_iso(ct, real_start)
+            if new:
+                meta_args += ["-metadata", f"creation_time={new}"]
+                for i, tags in stream_tags:
+                    if tags.get("creation_time"):
+                        meta_args += [f"-metadata:s:{i}", f"creation_time={new}"]
+                notes.append(f"дата съёмки в метаданных: {ct[:19]} + {real_start:.2f} с → {new[:22]}")
+        apple = fmt_tags.get("com.apple.quicktime.creationdate")
+        if apple and real_start > 0:
+            new = _shift_iso(apple, real_start)
+            if new:
+                meta_args += ["-metadata", f"com.apple.quicktime.creationdate={new}"]
+        if meta_args:
+            # метаданные меняются перепаковкой уже вырезанного куска, тоже без перекодировки
+            tmp = out.with_name(out.stem + ".tmp" + out.suffix)
+            proc = subprocess.run([args.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+                                   "-i", str(out), "-map", "0", "-c", "copy", "-map_metadata", "0",
+                                   "-movflags", "use_metadata_tags"] + meta_args + [str(tmp)], capture_output=True)
+            if proc.returncode == 0:
+                os.replace(tmp, out)
+            else:
+                tmp.unlink(missing_ok=True)
+                notes.append("дату в метаданных изменить не удалось")
+        if ext in (".mts", ".m2ts") and real_start > 0:
+            notes.append("дата AVCHD внутри потока сама соответствует началу куска")
+        # дата файла: у исходника это конец записи, поэтому конец куска = mtime − (длительность − конец куска)
+        piece_end = real_start + real
+        mtime_ns = st.st_mtime_ns - int((duration - piece_end) * 1e9)
+        birth_ns = mtime_ns - int(real * 1e9)
+        _set_times(out, mtime_ns, birth_ns)
+
+        from datetime import datetime
+        print(f"Готово: {out.name}")
+        print(f"  запрошено: {start:.2f}–{end:.2f} с ({end - start:.2f} с)")
+        if early > 0.1:
+            print(f"  без перекодировки кусок начинается с ближайшего ключевого кадра, "
+                  f"примерно на {early:.2f} с раньше ({real_start:.2f} с)")
+        print(f"  длительность результата: {real:.2f} с")
+        for n in notes:
+            print(f"  {n}")
+        print(f"  дата файла: создан {datetime.fromtimestamp(birth_ns / 1e9):%Y-%m-%d %H:%M:%S}, "
+              f"изменён {datetime.fromtimestamp(mtime_ns / 1e9):%Y-%m-%d %H:%M:%S} (начало и конец куска)")
+    return rc
+
+
+def ffprobe_json_safe(ffprobe: str, path: Path) -> dict:
+    from .probe import ffprobe_json
+    try:
+        return ffprobe_json(ffprobe, path)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(str(e)) from None
 
 
 # --- timelapse ----------------------------------------------------------------
@@ -603,10 +706,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ffprobe", default="ffprobe", help="путь к ffprobe")
     sub = p.add_subparsers(dest="command", required=True)
 
-    t = sub.add_parser("trim", epilog="Время (СЕК) можно задавать в секундах (90, 2.5) или как ЧЧ:ММ:СС / ММ:СС (01:30:00, 1:30).", help="вырезать кусок видео без перекодировки",
-                       description="Вырезает кусок видео без перекодировки, сохраняя метаданные и дату файла. "
-                                   "Результат: <имя>_trim_<параметры>.<расширение> рядом с исходником.")
+    t = sub.add_parser("trim", help="вырезать куски видео без перекодировки",
+                       epilog="Время (СЕК) можно задавать в секундах (90, 2.5) или как ЧЧ:ММ:СС / ММ:СС (01:30:00, 1:30).",
+                       description="Вырезает один или несколько кусков видео без перекодировки, сохраняя метаданные. "
+                                   "Дата съёмки в метаданных и даты файла сдвигаются на начало куска. "
+                                   "Результат: <имя>_trim_<ММ>m<СС>-<ММ>m<СС>.<расширение> рядом с исходником.")
     t.add_argument("file", help="видеофайл")
+    t.add_argument("ranges", nargs="*", type=_parse_range, metavar="НАЧАЛО-КОНЕЦ",
+                   help="куски, например 10-25 1:05-1:20 2:00-  (без конца — до конца файла)")
     t.add_argument("--start", type=seconds, metavar="СЕК", help="начало куска, с")
     t.add_argument("--end", type=seconds, metavar="СЕК", help="конец куска, с")
     t.add_argument("--cut-start", type=seconds, metavar="СЕК", help="сколько секунд отрезать от начала")

@@ -116,6 +116,17 @@ class DurationTest(unittest.TestCase):
                 parse_duration(bad)
 
 
+class TrimNamesTest(unittest.TestCase):
+    def test_names(self):
+        from avtokino.tools import _mmss, _parse_range
+        self.assertEqual(_mmss(10), "00m10")
+        self.assertEqual(_mmss(75.5), "01m15.5")
+        self.assertEqual(_mmss(3725), "62m05")
+        self.assertEqual(_parse_range("1:05-1:20"), (65, 80))
+        self.assertEqual(_parse_range("30-"), (30, None))
+        self.assertEqual(_parse_range("0:30-end"), (30, None))
+
+
 class MulticamTest(unittest.TestCase):
     def test_offset(self):
         from avtokino.multicam import parse_offset
