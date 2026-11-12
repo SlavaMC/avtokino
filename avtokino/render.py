@@ -128,6 +128,34 @@ def render_video(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderCo
     run(cmd)
 
 
+def render_pano(seg: Segment, base: Base, s: Settings, out: Path, ctx: RenderContext) -> None:
+    """Панорама 360 (фото или видео): камера поворачивается по кругу в обычном кадре."""
+    from types import SimpleNamespace
+
+    from .pano import flat_chain
+
+    it, info = seg.item, seg.item.info
+    opts = SimpleNamespace(rotation=s.pano_rotation, direction=s.pano_direction, fov=s.pano_fov,
+                           pitch=s.pano_pitch, yaw=s.pano_yaw)
+    src = SimpleNamespace(kind=it.kind, width=info.width, height=info.height)
+    frames = max(1, round(seg.duration * float(base.fps)))
+    vf = flat_chain(opts, src, base.width, base.height, base.fps, frames, seg.pano_offset)
+    vf = "setpts=PTS-STARTPTS," + vf if it.kind == "video" else vf
+    vf += _fade(seg.duration, s)
+    fps = f"{base.fps.numerator}/{base.fps.denominator}"
+    cmd = [s.ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(it.path)]
+    if seg.caption and ctx.caption_path:
+        _, shown, fades = _caption_timing(seg, s)
+        cmd += ["-loop", "1", "-framerate", fps, "-t", f"{shown:.3f}", "-i", str(ctx.caption_path)]
+        cap = "[1:v]format=rgba" + (f",{fades}" if fades else "") + "[cap]"
+        graph = f"[0:v:0]{vf}[main];{cap};[main][cap]overlay=0:0:eof_action=pass:format=auto,format=yuv420p[v]"
+    else:
+        graph = f"[0:v:0]{vf}[v]"
+    cmd += ["-filter_complex", graph, "-map", "[v]", "-frames:v", str(frames), "-r", fps,
+            "-an", "-sn", "-dn", "-map_metadata", "-1"] + encoder_args(base, s) + ["-f", "mpegts", str(out)]
+    run(cmd)
+
+
 def _fit_filter(base: Base) -> str:
     """Вписать видео в кадр целиком, с чёрными полями (режим --photo-fit касается только фото)."""
     w, h = base.width, base.height
@@ -262,6 +290,8 @@ def render_segment(seg: Segment, base: Base, s: Settings, tmp: Path, ctx: Render
     vout = tmp / f"seg{seg.index:05d}.ts"
     if seg.kind in ("copy", "transcode"):
         render_video(seg, base, s, vout, ctx)
+    elif seg.kind == "pano":
+        render_pano(seg, base, s, vout, ctx)
     elif seg.kind == "photo":
         render_photo(seg, base, s, vout, ctx)
     else:

@@ -115,6 +115,27 @@ def _rotation_chain(args, it: PanoItem, w: int, h: int, fps: Fraction, offset: i
     return prep, rot
 
 
+def flat_chain(opts, it, w: int, h: int, fps: Fraction, frames: int, offset: int) -> str:
+    """Полная цепочка фильтров режима flat для одного файла (фото или видео): от входа до кадра w x h.
+    opts — что угодно с полями rotation, direction, fov, pitch, yaw; it — с полями kind, width, height.
+    Используется и командой pano360, и автосборщиком."""
+    prep, rot = _rotation_chain(opts, it, w, h, fps, offset)
+    return f"{_pre(it, fps, frames, prep)},{rot},format=yuv420p"
+
+
+def _pre(it, fps: Fraction, frames: int, prep: str = "") -> str:
+    """Вход в кадры нужной частоты: фото размножается, видео приводится к fps."""
+    if it.kind == "photo":
+        # фото декодируется один раз и размножается фильтром loop (с -loop 1 огромный JPEG
+        # декодировался бы на каждом кадре). Метки времени задаются в базе 1/fps: в базе
+        # картинки (1/25) кадры 29.97 сливались бы и каждый шестой кадр повторялся.
+        pre = (f"format=yuv420p,{prep}loop=loop={frames - 1}:size=1:start=0,"
+               f"settb={fps.denominator}/{fps.numerator},setpts=N")
+    else:
+        pre = f"fps={fps.numerator}/{fps.denominator},format=yuv420p,{prep}".rstrip(",")
+    return pre
+
+
 def _render(i: int, it: PanoItem, args, w: int, h: int, fps: Fraction, offset: float, tmp: Path):
     vout, aout = tmp / f"v{i:04d}.ts", tmp / f"a{i:04d}.wav"
     frames = max(1, round(it.duration * float(fps)))
@@ -125,19 +146,10 @@ def _render(i: int, it: PanoItem, args, w: int, h: int, fps: Fraction, offset: f
     if args.max_bitrate:
         r = int(args.max_bitrate * 1_000_000)
         enc += ["-maxrate", str(r), "-bufsize", str(2 * r)]
-    prep, rot = _rotation_chain(args, it, w, h, fps, offset) if args.mode == "flat" else ("", "")
-    if it.kind == "photo":
-        # фото декодируется один раз и размножается фильтром loop (с -loop 1 огромный JPEG
-        # декодировался бы на каждом кадре). Метки времени задаются в базе 1/fps: в базе
-        # картинки (1/25) кадры 29.97 сливались бы и каждый шестой кадр повторялся.
-        pre = (f"format=yuv420p,{prep}loop=loop={frames - 1}:size=1:start=0,"
-               f"settb={fps.denominator}/{fps.numerator},setpts=N")
-        inp = ["-i", str(it.path)]
-    else:
-        pre = f"fps={rate},format=yuv420p,{prep}".rstrip(",")
-        inp = ["-i", str(it.path)]
+    inp = ["-i", str(it.path)]
+    pre = _pre(it, fps, frames)
     if args.mode == "flat":
-        chain = f"[0:v]{pre}," + rot + ",format=yuv420p[v]"
+        chain = f"[0:v]{flat_chain(args, it, w, h, fps, frames, offset)}[v]"
     else:
         chain = f"[0:v]{pre},scale={w}:{h}:flags=lanczos,setsar=1,format=yuv420p[v]"
     _run([args.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y"] + inp +

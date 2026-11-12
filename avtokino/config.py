@@ -58,6 +58,14 @@ class Settings:
     date_tolerance: float = 6.0          # часов запаса вокруг периода события
     time_fixes: list | None = None       # поправки сбитых часов (timedelta), пробуются по порядку
     shifts: list | None = None           # сдвиги даты по маске файла: [(маска, секунды)]
+    pano: bool = True                    # панорамы 360 — облётом камеры в обычном кадре
+    pano_duration: float = 15.0          # сколько показывать фото 360
+    pano_rotation: float = 8.0           # секунд на оборот
+    pano_direction: str = "right"
+    pano_fov: float = 90.0
+    pano_pitch: float = 0.0
+    pano_yaw: float = 0.0
+    pano_continuous: bool = True         # поворот продолжается от панорамы к панораме
     transition: str = "none"
     transition_duration: float = 0.5
     title: bool = False

@@ -21,7 +21,7 @@ from .config import IGNORED_NAMES, PHOTO_EXTS, VIDEO_EXTS, Settings
 from .durations import hours, parse_duration, seconds
 from .dating import check_utc, fmt_delta, parse_time_fix, estimate_offset, fs_date, name_date, photo_meta, resolve, video_meta
 from .naming import choose_output, output_pattern, parse_dir_name
-from .planner import Item, build_plan, choose_base, fps_str, gopro_trim, ratio_str
+from .planner import Item, build_plan, choose_base, fps_str, gopro_trim, is_pano, ratio_str
 from .probe import HEIF_SUPPORTED, probe_photo, probe_video
 from .render import RenderContext, has_filter, make_caption, render_segment
 
@@ -168,6 +168,26 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     g.add_argument("--caption-duration", type=seconds, default=10.0, metavar="СЕК",
                    help="сколько секунд от начала показывать подпись (10)")
     g.add_argument("--caption-font", metavar="ФАЙЛ", help="шрифт подписи (.ttf), например Roboto-Regular.ttf")
+    g = p.add_argument_group("панорамы 360",
+                             "фото и видео 360 (развёртка 2:1 с пометкой 360) показываются облётом камеры "
+                             "по кругу в обычном кадре ролика")
+    g.add_argument("--no-pano", action="store_true",
+                   help="не распознавать панорамы 360: показывать их как обычные фото и видео")
+    g.add_argument("--pano-duration", type=seconds, default=15.0, metavar="СЕК",
+                   help="сколько показывать фото 360, с (15); видео 360 идёт целиком")
+    g.add_argument("--pano-rotation", type=seconds, default=8.0, metavar="СЕК",
+                   help="время одного оборота, с (8); округляется до целого числа кадров")
+    g.add_argument("--pano-direction", choices=["right", "left"], default="right",
+                   help="направление поворота (right)")
+    g.add_argument("--pano-fov", type=float, default=90.0, metavar="ГРАД",
+                   help="угол обзора по горизонтали, градусы (90)")
+    g.add_argument("--pano-pitch", type=float, default=0.0, metavar="ГРАД",
+                   help="наклон камеры, градусы: плюс — вверх, минус — вниз (0)")
+    g.add_argument("--pano-yaw", type=float, default=0.0, metavar="ГРАД",
+                   help="начальное направление, градусы (0 — центр панорамы)")
+    g.add_argument("--pano-no-continuous", action="store_true",
+                   help="каждая панорама с начального направления (по умолчанию поворот продолжается "
+                        "с того места, где закончилась предыдущая панорама)")
     g = p.add_argument_group("работа")
     g.add_argument("--jobs", type=int, default=2, help="параллельных задач рендера (2)")
     g.add_argument("--temp-dir", type=Path, help="каталог для временных файлов (по умолчанию в рабочем)")
@@ -192,6 +212,9 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         caption=a.caption or bool(a.caption_name or a.caption_date), caption_name=a.caption_name,
         caption_date=a.caption_date, caption_duration=a.caption_duration, caption_font=a.caption_font,
         tz=a.tz, date_tolerance=a.date_tolerance, time_fixes=a.time_fix or [], shifts=a.shift or [],
+        pano=not a.no_pano, pano_duration=a.pano_duration, pano_rotation=a.pano_rotation,
+        pano_direction=a.pano_direction, pano_fov=a.pano_fov, pano_pitch=a.pano_pitch, pano_yaw=a.pano_yaw,
+        pano_continuous=not a.pano_no_continuous,
         transition=a.transition, transition_duration=a.transition_duration,
         title=a.title or bool(a.title_text), title_text=a.title_text,
         title_duration=a.title_duration, jobs=max(1, a.jobs), temp_dir=a.temp_dir,
@@ -258,6 +281,9 @@ def is_excluded(rel: str, patterns: list[str]) -> bool:
     return False
 
 
+_PANO_OUT = re.compile(r"^.+_pano(?:360)?(?:_v\d+)?$", re.IGNORECASE)
+
+
 def scan(s: Settings, out_re: re.Pattern, skip_dirs: list[Path]) -> tuple[list[Path], list[Path]]:
     videos, photos = [], []
     for root, dirs, files in os.walk(s.workdir):
@@ -276,6 +302,9 @@ def scan(s: Settings, out_re: re.Pattern, skip_dirs: list[Path]) -> tuple[list[P
             p = rootp / f
             ext = p.suffix.lower()
             if f.lower() in IGNORED_NAMES or f.startswith(".") or ext not in VIDEO_EXTS | PHOTO_EXTS:
+                continue
+            if _PANO_OUT.match(p.stem) and p.stem.casefold().startswith(rootp.name.casefold() + "_pano"):
+                log.info("Пропуск (ролик команды pano360): %s", p.relative_to(s.workdir))
                 continue
             if out_re.match(p.stem):
                 log.info("Пропуск (ранее собранный ролик): %s", p.relative_to(s.workdir))
@@ -419,7 +448,8 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
         log.warning("Поправки часов не применены: в имени каталога нет периода события")
     items.sort(key=lambda it: (it.rel in outside, it.when, it.rel))
 
-    base = choose_base([it.info for it in items if it.kind == "video"], s)
+    # видео 360 не задают кадр ролика: из них получается облёт в обычном кадре
+    base = choose_base([it.info for it in items if it.kind == "video" and not is_pano(it, s)], s)
     log.info("")
     log.info("--- Базовые параметры ---")
     log.info("Разрешение:      %s", base.resolution)
@@ -435,6 +465,13 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
     log.info("Основание:       %s", base.source)
     log.info("Фото:            %s", "горизонтальные на весь кадр с обрезкой, вертикальные целиком"
              if s.photo_fit == "cover" else "целиком, с полями")
+    panos = [it for it in items if is_pano(it, s)]
+    if panos:
+        n_turn = max(8, round(s.pano_rotation * float(base.fps)))
+        log.info("Панорамы 360:    %d (фото %d, видео %d): облёт, 1 оборот за %.3f с, угол обзора %g°, "
+                 "наклон %g°, %s; фото 360 по %g с", len(panos), sum(it.kind == "photo" for it in panos),
+                 sum(it.kind == "video" for it in panos), n_turn / float(base.fps), s.pano_fov, s.pano_pitch,
+                 "вправо" if s.pano_direction == "right" else "влево", s.pano_duration)
     if s.gopro_trim > 0:
         log.info("GoPro:           обрезка последних %g с", s.gopro_trim)
 
@@ -450,7 +487,8 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
         if it is first_outside:
             log.info("--- Вне периода события, в конец ролика (%d) ---", len(outside))
         log.info("%s  %-5s  %s  [%s]", it.when.strftime("%Y-%m-%d %H:%M:%S"),
-                 "видео" if it.kind == "video" else "фото", it.rel, it.date_source)
+                 ("360в" if it.kind == "video" else "360ф") if is_pano(it, s)
+                 else ("видео" if it.kind == "video" else "фото"), it.rel, it.date_source)
 
     long_videos = [it for it in items if it.kind == "video" and s.long_video > 0
                    and it.info.duration > s.long_video]

@@ -41,6 +41,7 @@ class VideoInfo:
     achannels: int | None = None
     abitrate: int | None = None
     tags: dict = field(default_factory=dict)
+    spherical: bool = False   # пометка 360 (равнопромежуточная проекция)
 
     @property
     def resolution(self) -> str:
@@ -55,6 +56,7 @@ class PhotoInfo:
     exif_datetime: str | None = None
     exif_offset: str | None = None
     exif_tag: str | None = None
+    spherical: bool = False   # XMP GPano: панорама 360
 
 
 def _fraction(value: str | None) -> Fraction:
@@ -105,6 +107,9 @@ def probe_video(ffprobe: str, path: Path) -> VideoInfo | None:
     if vbitrate is None and fmt.get("bit_rate"):
         vbitrate = int(fmt["bit_rate"]) - (int(a["bit_rate"]) if a and a.get("bit_rate") else 0)
 
+    spherical = any(sd.get("side_data_type") == "Spherical Mapping"
+                    and sd.get("projection", "equirectangular") == "equirectangular"
+                    for sd in v.get("side_data_list", []) or [])
     tags = {}
     tags.update({k.lower(): val for k, val in (fmt.get("tags") or {}).items()})
     for k, val in (v.get("tags") or {}).items():
@@ -122,13 +127,24 @@ def probe_video(ffprobe: str, path: Path) -> VideoInfo | None:
         arate=int(a["sample_rate"]) if a and a.get("sample_rate") else None,
         achannels=a.get("channels") if a else None,
         abitrate=int(a["bit_rate"]) if a and a.get("bit_rate") else None,
-        tags=tags,
+        tags=tags, spherical=spherical,
     )
 
 
 _EXIF_IFD = 0x8769
 _DATE_TAGS = [(36867, 36881, "EXIF DateTimeOriginal"),
               (36868, 36882, "EXIF DateTimeDigitized")]
+
+
+def _photo_spherical(path: Path) -> bool:
+    """XMP с GPano:ProjectionType=equirectangular (Gear 360, Insta360, Ricoh Theta, Google Камера)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1 << 20)
+    except OSError:
+        return False
+    i = head.find(b"ProjectionType")
+    return i >= 0 and b"equirectangular" in head[i:i + 80]
 
 
 def probe_photo(path: Path) -> PhotoInfo:
@@ -138,7 +154,7 @@ def probe_photo(path: Path) -> PhotoInfo:
         orientation = exif.get(0x0112, 1)
         if orientation in (5, 6, 7, 8):
             w, h = h, w
-        info = PhotoInfo(path=path, width=w, height=h)
+        info = PhotoInfo(path=path, width=w, height=h, spherical=_photo_spherical(path))
         ifd = exif.get_ifd(_EXIF_IFD) if exif else {}
         for tag, off_tag, label in _DATE_TAGS:
             if ifd.get(tag):

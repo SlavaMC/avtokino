@@ -22,6 +22,13 @@ class Item:
     date_source: str
 
 
+def is_pano(it: "Item", s: Settings) -> bool:
+    """Панорама 360: развёртка 2:1 с пометкой сферической проекции (XMP у фото, sv3d/XMP у видео)."""
+    info = it.info
+    return (s.pano and getattr(info, "spherical", False)
+            and abs(info.width - 2 * info.height) <= info.height * 0.02)
+
+
 @dataclass
 class Base:
     width: int
@@ -53,6 +60,7 @@ class Segment:
     video_path: Path | None = None
     audio_path: Path | None = None
     real_duration: float | None = None
+    pano_offset: int = 0             # кадр внутри оборота, с которого продолжается поворот панорамы
 
 
 def gopro_trim(path: Path, s: Settings) -> float:
@@ -208,15 +216,17 @@ def estimate_rate(base: Base, kind: str) -> int:
 
 
 def photo_durations(items: list[Item], s: Settings) -> list[float]:
-    """Серии из более чем N фото подряд получают сокращённую длительность целиком."""
+    """Серии из более чем N фото подряд получают сокращённую длительность целиком.
+    Панорамы 360 в серии не входят."""
     durs = [0.0] * len(items)
+    flat = [it.kind == "photo" and not is_pano(it, s) for it in items]
     i = 0
     while i < len(items):
-        if items[i].kind != "photo":
+        if not flat[i]:
             i += 1
             continue
         j = i
-        while j < len(items) and items[j].kind == "photo":
+        while j < len(items) and flat[j]:
             j += 1
         d = s.photo_burst_duration if (j - i) > s.photo_burst_threshold else s.photo_duration
         for k in range(i, j):
@@ -234,9 +244,24 @@ def build_plan(items: list[Item], base: Base, s: Settings) -> list[Segment]:
         segments.append(seg)
     durs = photo_durations(items, s)
     photo_n = 0
+    pano_frames = 0                  # сколько кадров уже повернулись панорамы
     for it, pd in zip(items, durs):
         idx = len(segments)
-        if it.kind == "photo":
+        if is_pano(it, s):
+            info = it.info
+            dur = s.pano_duration if it.kind == "photo" else info.duration
+            seg = Segment(idx, "pano", dur, it, pano_offset=pano_frames if s.pano_continuous else 0)
+            frames = max(1, round(dur * float(base.fps)))
+            pano_frames += frames
+            n_turn = max(8, round(s.pano_rotation * float(base.fps)))
+            seg.actions.append(f"панорама 360 ({'фото' if it.kind == 'photo' else 'видео'} "
+                               f"{info.width}x{info.height}) → облёт в кадре {base.resolution}: угол обзора "
+                               f"{s.pano_fov:g}°, наклон {s.pano_pitch:g}°, "
+                               f"{'вправо' if s.pano_direction == 'right' else 'влево'}, 1 оборот за "
+                               f"{n_turn / float(base.fps):.3f} с")
+            seg.actions.append(f"кодирование {base.vcodec} {fps_str(base.fps)} к/с")
+            seg.audio_note = audio_note(info, s) if it.kind == "video" else "тишина"
+        elif it.kind == "photo":
             p: PhotoInfo = it.info
             seg = Segment(idx, "photo", pd, it, zoom_in=(photo_n % 2 == 0))
             photo_n += 1

@@ -158,3 +158,25 @@ class MulticamTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PanoAutoTest(unittest.TestCase):
+    def test_pano_detection_and_bursts(self):
+        from avtokino.config import Settings
+        from avtokino.planner import Item, is_pano, photo_durations
+        from avtokino.probe import PhotoInfo
+
+        s = Settings(workdir=Path("."))
+        when = datetime(2018, 2, 13)
+        pano = Item(Path("p.jpg"), "p.jpg", "photo", PhotoInfo(Path("p.jpg"), 7776, 3888, spherical=True), when, "")
+        wide = Item(Path("w.jpg"), "w.jpg", "photo", PhotoInfo(Path("w.jpg"), 4000, 2000), when, "")
+        odd = Item(Path("o.jpg"), "o.jpg", "photo", PhotoInfo(Path("o.jpg"), 4000, 3000, spherical=True), when, "")
+        self.assertTrue(is_pano(pano, s))
+        self.assertFalse(is_pano(wide, s))       # 2:1 без пометки 360
+        self.assertFalse(is_pano(odd, s))        # пометка есть, но не 2:1
+        s.pano = False
+        self.assertFalse(is_pano(pano, s))
+        s.pano = True
+        # панорама разрывает серию: 3 + 3 фото не дают серию больше 5
+        items = [wide] * 3 + [pano] + [wide] * 3
+        self.assertEqual(photo_durations(items, s), [5.0] * 3 + [0.0] + [5.0] * 3)
