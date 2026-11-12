@@ -6,6 +6,7 @@
   rotate180   перевернуть видео на 180° без перекодировки
   sync        рассинхронизация двух роликов с разных камер по звуку
   multicam    общий ролик из двух камер с переключением каждые N секунд
+  pano360     ролик из панорам 360: облёт в обычном кадре или полноценный 360
 """
 from __future__ import annotations
 
@@ -760,6 +761,8 @@ def main(argv: list[str] | None = None) -> int:
 
     from .multicam import add_parser as _add_multicam
     _add_multicam(sub, _parse_resolution)
+    from .pano import add_parser as _add_pano
+    _add_pano(sub, _parse_resolution, seconds)
 
     a = p.parse_args(argv)
     if a.command == "trim" and (a.start is not None or a.end is not None) and (a.cut_start or a.cut_end):
