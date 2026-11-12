@@ -233,6 +233,92 @@ def inject_spherical(path: Path) -> bool:
     return True
 
 
+SPHERICAL_V1_UUID = bytes.fromhex("ffcc8263f8554a938814587a02521fdd")
+
+
+def spherical_v1_box() -> bytes:
+    """Пометка 360 первой версии (XMP в uuid-боксе дорожки) — её пишет Gear 360 ActionDirector
+    и читают многие настольные плееры (GoPro Player и др.), которые не знают sv3d."""
+    xmp = ('<?xml version="1.0"?><rdf:SphericalVideo xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+           'xmlns:GSpherical="http://ns.google.com/videos/1.0/spherical/">'
+           '<GSpherical:Spherical>true</GSpherical:Spherical>'
+           '<GSpherical:Stitched>true</GSpherical:Stitched>'
+           '<GSpherical:StitchingSoftware>avtokino</GSpherical:StitchingSoftware>'
+           '<GSpherical:ProjectionType>equirectangular</GSpherical:ProjectionType>'
+           '</rdf:SphericalVideo>').encode()
+    return _box(b"uuid", SPHERICAL_V1_UUID + xmp)
+
+
+def inject_spherical_v1(path: Path) -> bool:
+    """Дописывает uuid-бокс в конец видеодорожки. Если moov стоит перед mdat (+faststart),
+    данные сдвигаются, поэтому смещения в stco/co64 всех дорожек увеличиваются."""
+    data = bytearray(path.read_bytes())
+
+    def children(start: int, end: int):
+        pos = start
+        while pos + 8 <= end:
+            size, kind = struct.unpack(">I4s", data[pos:pos + 8])
+            hdr = 8
+            if size == 1:
+                size, hdr = struct.unpack(">Q", data[pos + 8:pos + 16])[0], 16
+            elif size == 0:
+                size = end - pos
+            yield pos, size, kind, hdr
+            pos += size
+
+    def find(node, *kinds):
+        for want in kinds:
+            node = next(((p, sz, hd) for p, sz, k, hd in children(node[0] + node[2], node[0] + node[1])
+                         if k == want), None)
+            if node is None:
+                return None
+        return node
+
+    top = {k: (p, sz, hd) for p, sz, k, hd in children(0, len(data))}
+    if b"moov" not in top or b"mdat" not in top:
+        return False
+    moov = top[b"moov"]
+    traks = [(p, sz, hd) for p, sz, k, hd in children(moov[0] + moov[2], moov[0] + moov[1]) if k == b"trak"]
+    video = None
+    for t in traks:
+        hdlr = find(t, b"mdia", b"hdlr")
+        if hdlr and data[hdlr[0] + hdlr[2] + 8:hdlr[0] + hdlr[2] + 12] == b"vide":
+            video = t
+            break
+    if video is None:
+        return False
+    if any(k == b"uuid" and data[p + hd:p + hd + 16] == SPHERICAL_V1_UUID
+           for p, sz, k, hd in children(video[0] + video[2], video[0] + video[1])):
+        return True
+    box = spherical_v1_box()
+    n = len(box)
+    if moov[0] < top[b"mdat"][0]:
+        for t in traks:
+            for kind in (b"stco", b"co64"):
+                tbl = find(t, b"mdia", b"minf", b"stbl", kind)
+                if not tbl:
+                    continue
+                base = tbl[0] + tbl[2] + 4
+                count = struct.unpack(">I", data[base:base + 4])[0]
+                w = 4 if kind == b"stco" else 8
+                fmt = ">I" if w == 4 else ">Q"
+                for i in range(count):
+                    o = base + 4 + i * w
+                    v = struct.unpack(fmt, data[o:o + w])[0] + n
+                    if w == 4 and v >= 1 << 32:
+                        return False
+                    data[o:o + w] = struct.pack(fmt, v)
+    for pos, hdr in ((moov[0], moov[2]), (video[0], video[2])):
+        if hdr == 16:
+            data[pos + 8:pos + 16] = struct.pack(">Q", struct.unpack(">Q", data[pos + 8:pos + 16])[0] + n)
+        else:
+            data[pos:pos + 4] = struct.pack(">I", struct.unpack(">I", data[pos:pos + 4])[0] + n)
+    at = video[0] + video[1]
+    data[at:at] = box
+    path.write_bytes(bytes(data))
+    return True
+
+
 def _output(folder: Path, mode: str) -> Path:
     base = f"{folder.name}_pano{'360' if mode == '360' else ''}"
     out = folder / f"{base}.mp4"
@@ -344,6 +430,9 @@ def pano360(args) -> int:
             # перенос moov в начало; ffmpeg сохраняет пометку 360 только с -strict unofficial
             _run([args.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", str(raw),
                   "-map", "0", "-c", "copy", "-strict", "unofficial", "-movflags", "+faststart", str(out)])
+            if not inject_spherical_v1(out):
+                print("Не удалось записать пометку 360 (XMP) в файл", file=sys.stderr)
+                return 1
     ts = created.timestamp()
     os.utime(out, (ts, ts))
     print(f"Готово: {out}")
