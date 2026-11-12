@@ -88,15 +88,31 @@ def _collect(folder: Path, mask: str, args) -> tuple[list[PanoItem], list[str]]:
     return items, skipped
 
 
-def _rotation_chain(args, w: int, h: int, offset: float) -> str:
-    """Поворот камеры: окно, скользящее по удвоенной панораме, и v360 в обычный кадр."""
+def turn_frames(args, fps: Fraction) -> int:
+    """Сколько кадров длится один оборот: целое число, чтобы окно сдвигалось каждый кадр
+    на одно и то же целое число пикселей (иначе шаг скачет 32/33 пикселя и картинка дёргается)."""
+    return max(8, round(args.rotation * float(fps)))
+
+
+def _rotation_chain(args, it: PanoItem, w: int, h: int, fps: Fraction, offset: int) -> tuple[str, str]:
+    """Поворот камеры: окно, скользящее по удвоенной панораме, и v360 в обычный кадр.
+
+    Возвращает (подготовка ширины панорамы, сам поворот). Панорама растягивается по ширине
+    до N*step пикселей (N — кадров на оборот), так что шаг за кадр — целый и одинаковый,
+    а скорость поворота одна и та же для всех файлов. offset — номер кадра внутри оборота,
+    с которого продолжается поворот после предыдущего файла."""
+    n_turn = turn_frames(args, fps)
+    step = max(1, math.ceil(it.width / n_turn))
+    pw = n_turn * step
     sign = 1 if args.direction == "right" else -1
     v_fov = math.degrees(2 * math.atan(math.tan(math.radians(args.fov) / 2) * h / w))
-    # x — сдвиг окна; offset продолжает поворот с того места, где закончился предыдущий файл
-    x = f"mod(({offset:.6f}+t)/{args.rotation:.6f}*in_w/2*{sign}+in_w*2\\,in_w/2)"
-    return (f"split[a][b];[a][b]hstack,crop=w=in_w/2:h=in_h:x='{x}',"
-            f"v360=e:flat:yaw={args.yaw:g}:pitch={args.pitch:g}:h_fov={args.fov:g}:v_fov={v_fov:.4f}"
-            f":w={w}:h={h}:interp=cubic")
+    start = (offset % n_turn) * step
+    x = f"mod({start}+{sign * step}*n+{pw}*(n+1)\\,{pw})"
+    prep = f"scale={pw}:{it.height}:flags=lanczos," if pw != it.width else ""
+    rot = (f"split[a][b];[a][b]hstack,crop=w={pw}:h=in_h:x='{x}',"
+           f"v360=e:flat:yaw={args.yaw:g}:pitch={args.pitch:g}:h_fov={args.fov:g}:v_fov={v_fov:.4f}"
+           f":w={w}:h={h}:interp=cubic")
+    return prep, rot
 
 
 def _render(i: int, it: PanoItem, args, w: int, h: int, fps: Fraction, offset: float, tmp: Path):
@@ -109,16 +125,19 @@ def _render(i: int, it: PanoItem, args, w: int, h: int, fps: Fraction, offset: f
     if args.max_bitrate:
         r = int(args.max_bitrate * 1_000_000)
         enc += ["-maxrate", str(r), "-bufsize", str(2 * r)]
+    prep, rot = _rotation_chain(args, it, w, h, fps, offset) if args.mode == "flat" else ("", "")
     if it.kind == "photo":
         # фото декодируется один раз и размножается фильтром loop (с -loop 1 огромный JPEG
-        # декодировался бы на каждом кадре)
-        pre = f"format=yuv420p,loop=loop={frames - 1}:size=1:start=0,setpts=N/({rate})/TB"
+        # декодировался бы на каждом кадре). Метки времени задаются в базе 1/fps: в базе
+        # картинки (1/25) кадры 29.97 сливались бы и каждый шестой кадр повторялся.
+        pre = (f"format=yuv420p,{prep}loop=loop={frames - 1}:size=1:start=0,"
+               f"settb={fps.denominator}/{fps.numerator},setpts=N")
         inp = ["-i", str(it.path)]
     else:
-        pre = f"fps={rate},format=yuv420p"
+        pre = f"fps={rate},format=yuv420p,{prep}".rstrip(",")
         inp = ["-i", str(it.path)]
     if args.mode == "flat":
-        chain = f"[0:v]{pre}," + _rotation_chain(args, w, h, offset) + ",format=yuv420p[v]"
+        chain = f"[0:v]{pre}," + rot + ",format=yuv420p[v]"
     else:
         chain = f"[0:v]{pre},scale={w}:{h}:flags=lanczos,setsar=1,format=yuv420p[v]"
     _run([args.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y"] + inp +
@@ -265,7 +284,8 @@ def pano360(args) -> int:
     if args.mode == "flat":
         print(f"Режим: обычный кадр {w}x{h}, {float(fps):.3f} кадр/с; угол обзора {args.fov:g}°, наклон "
               f"{args.pitch:g}°, поворот {'вправо' if args.direction == 'right' else 'влево'}, "
-              f"1 оборот за {args.rotation:g} с; фото по {args.photo_duration:g} с")
+              f"1 оборот за {turn_frames(args, fps) / float(fps):.3f} с ({turn_frames(args, fps)} кадров); "
+              f"фото по {args.photo_duration:g} с")
     else:
         print(f"Режим: ролик 360, {w}x{h}, {float(fps):.3f} кадр/с; фото по {args.photo_duration:g} с")
     print(f"Ролик: {out}")
@@ -281,10 +301,10 @@ def pano360(args) -> int:
         return 0
 
     # поворот продолжается от файла к файлу без скачков
-    offsets, acc = [], 0.0
+    offsets, acc = [], 0
     for it in items:
-        offsets.append(acc if args.continuous else 0.0)
-        acc += it.duration
+        offsets.append(acc if args.continuous else 0)
+        acc += max(1, round(it.duration * float(fps)))
     with tempfile.TemporaryDirectory(prefix="pano_", dir=args.temp_dir) as td:
         tmp = Path(td)
         results = [None] * len(items)
