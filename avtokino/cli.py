@@ -281,6 +281,18 @@ def is_excluded(rel: str, patterns: list[str]) -> bool:
     return False
 
 
+def _stitched_elsewhere(p: Path, info) -> bool:
+    """Исходник из двух полусфер (2:1 без пометки 360), для которого рядом уже лежит результат
+    stitch360: <имя>_stich.mp4 или серия <каталог>_stich_series.mp4."""
+    if info.spherical or abs(info.width - 2 * info.height) > 2:
+        return False
+    names = {f.name.casefold() for f in p.parent.iterdir() if f.is_file()}
+    if f"{p.stem}_stich.mp4".casefold() in names:
+        return True
+    series = f"{p.parent.name}_stich_series".casefold()
+    return any(n.startswith(series) and n.endswith(".mp4") for n in names)
+
+
 _PANO_OUT = re.compile(r"^.+_pano(?:360)?(?:_v\d+)?$", re.IGNORECASE)
 
 
@@ -375,6 +387,9 @@ def _run(s: Settings, event, output: Path, tmp: Path, skip: list[Path], started:
         rel = p.relative_to(s.workdir).as_posix()
         if info is None:
             log.warning("Пропуск %s: нет видеопотока", rel)
+            continue
+        if _stitched_elsewhere(p, info):
+            log.info("Пропуск %s: несшитый ролик 360, есть сшитый (stitch360)", rel)
             continue
         trim = gopro_trim(p, s)
         if info.duration - trim < s.min_clip:

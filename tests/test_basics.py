@@ -180,3 +180,24 @@ class PanoAutoTest(unittest.TestCase):
         # панорама разрывает серию: 3 + 3 фото не дают серию больше 5
         items = [wide] * 3 + [pano] + [wide] * 3
         self.assertEqual(photo_durations(items, s), [5.0] * 3 + [0.0] + [5.0] * 3)
+
+
+class StitchTest(unittest.TestCase):
+    def test_dual_fisheye_detection(self):
+        import numpy as np
+        from avtokino.stitch import _looks_dual_fisheye
+        h, w = 400, 800
+        yy, xx = np.mgrid[0:h, 0:w]
+        img = np.zeros((h, w, 3), np.uint8)
+        for cx in (200, 600):
+            img[(xx - cx) ** 2 + (yy - 200) ** 2 < 195 ** 2] = 120
+        self.assertTrue(_looks_dual_fisheye(img))
+        self.assertFalse(_looks_dual_fisheye(np.full((h, w, 3), 120, np.uint8)))
+
+    def test_gains_balance(self):
+        import numpy as np
+        from avtokino.stitch import Calib, gains
+        img = np.full((400, 800, 3), 100, np.uint8)
+        img[:, 400:] = 125                      # задний объектив светлее
+        gf, gb = gains(Calib(195, 200, 200, 200, 200), [img])
+        self.assertAlmostEqual(float(100 * gf[0]), float(125 * gb[0]), delta=1)

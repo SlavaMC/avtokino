@@ -484,3 +484,88 @@ def add_parser(sub, parse_resolution, seconds) -> None:
     p.add_argument("--temp-dir", type=Path, help="каталог для временных файлов")
     p.add_argument("--dry-run", action="store_true", help="только список и порядок файлов")
     p.set_defaults(func=pano360)
+
+
+def _boxes(data, start: int, end: int):
+    pos = start
+    while pos + 8 <= end:
+        size, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        hdr = 8
+        if size == 1:
+            size, hdr = struct.unpack(">Q", data[pos + 8:pos + 16])[0], 16
+        elif size == 0:
+            size = end - pos
+        if size < hdr:
+            return
+        yield pos, size, kind, hdr
+        pos += size
+
+
+def _grow(data: bytearray, pos: int, hdr: int, n: int) -> None:
+    if hdr == 16:
+        data[pos + 8:pos + 16] = struct.pack(">Q", struct.unpack(">Q", data[pos + 8:pos + 16])[0] + n)
+    else:
+        data[pos:pos + 4] = struct.pack(">I", struct.unpack(">I", data[pos:pos + 4])[0] + n)
+
+
+def inject_360_tail(path: Path) -> bool:
+    """Пометка 360 в обоих форматах (sv3d/st3d и XMP uuid) в файл, где moov — последний бокс
+    (ffmpeg без +faststart). Правится только moov в конце файла, mdat не читается и не сдвигается,
+    поэтому подходит и для многогигабайтных роликов."""
+    with open(path, "r+b") as f:
+        f.seek(0, 2)
+        total = f.tell()
+        pos, moov = 0, None
+        while pos + 8 <= total:
+            f.seek(pos)
+            head = f.read(16)
+            size, kind = struct.unpack(">I4s", head[:8])
+            if size == 1:
+                size = struct.unpack(">Q", head[8:16])[0]
+            elif size == 0:
+                size = total - pos
+            if kind == b"moov":
+                moov = (pos, size)
+            pos += size
+        if moov is None or moov[0] + moov[1] != total:
+            return False
+        f.seek(moov[0])
+        data = bytearray(f.read(moov[1]))
+        m_hdr = 16 if struct.unpack(">I", data[:4])[0] == 1 else 8
+        for tpos, tsize, tkind, thdr in _boxes(data, m_hdr, len(data)):
+            if tkind != b"trak":
+                continue
+            chain, node = [(0, m_hdr), (tpos, thdr)], (tpos, tsize, thdr)
+            for want in (b"mdia", b"minf", b"stbl", b"stsd"):
+                node = next(((p, s, h) for p, s, k, h in _boxes(data, node[0] + node[2], node[0] + node[1])
+                             if k == want), None)
+                if node is None:
+                    break
+                chain.append((node[0], node[2]))
+            if node is None:
+                continue
+            entry = node[0] + node[2] + 8
+            esize, ekind = struct.unpack(">I4s", data[entry:entry + 8])
+            if ekind not in (b"avc1", b"hvc1", b"hev1"):
+                continue
+            has_v2 = any(k == b"sv3d" for _, _, k, _ in _boxes(data, entry + 8 + 78, entry + esize))
+            has_v1 = any(k == b"uuid" and data[p + h:p + h + 16] == SPHERICAL_V1_UUID
+                         for p, _, k, h in _boxes(data, tpos + thdr, tpos + tsize))
+            # сначала uuid в конец trak (он дальше по файлу, позиции до него не сдвигаются)
+            if not has_v1:
+                v1 = spherical_v1_box()
+                at = tpos + tsize
+                data[at:at] = v1
+                _grow(data, 0, m_hdr, len(v1))
+                _grow(data, tpos, thdr, len(v1))
+            if not has_v2:
+                v2 = spherical_boxes()
+                at = entry + esize
+                data[at:at] = v2
+                for p, h in chain + [(entry, 8)]:
+                    _grow(data, p, h, len(v2))
+            f.seek(moov[0])
+            f.write(data)
+            f.truncate()
+            return True
+    return False

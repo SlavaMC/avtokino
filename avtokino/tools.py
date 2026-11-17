@@ -763,6 +763,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_multicam(sub, _parse_resolution)
     from .pano import add_parser as _add_pano
     _add_pano(sub, _parse_resolution, seconds)
+    from .stitch import add_parser as _add_stitch
+    _add_stitch(sub, seconds)
 
     a = p.parse_args(argv)
     if a.command == "trim" and (a.start is not None or a.end is not None) and (a.cut_start or a.cut_end):
