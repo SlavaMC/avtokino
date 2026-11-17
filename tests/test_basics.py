@@ -201,3 +201,24 @@ class StitchTest(unittest.TestCase):
         img[:, 400:] = 125                      # задний объектив светлее
         gf, gb = gains(Calib(195, 200, 200, 200, 200), [img])
         self.assertAlmostEqual(float(100 * gf[0]), float(125 * gb[0]), delta=1)
+
+
+class PanoramaTest(unittest.TestCase):
+    def test_output_name(self):
+        from avtokino.panorama import output_name
+        files = [Path("/nonexistent/P6070226.ORF"), Path("/nonexistent/P6070232.ORF")]
+        self.assertEqual(output_name(files).name, "P6070226-232_pano.jpg")
+        files = [Path("/nonexistent/IMG_0998.jpg"), Path("/nonexistent/IMG_1003.jpg")]
+        self.assertEqual(output_name(files).name, "IMG_0998-1003_pano.jpg")
+
+    def test_inscribed_rect(self):
+        try:
+            import cv2  # noqa: F401
+        except ImportError:
+            self.skipTest("нет opencv")
+        import numpy as np
+        from avtokino.panorama import inscribed_rect
+        img = np.zeros((400, 800, 3), np.uint8)
+        img[50:350, 100:700] = 200
+        x0, y0, x1, y1 = inscribed_rect(img)
+        self.assertTrue(100 <= x0 < 130 and 50 <= y0 < 80 and 670 < x1 <= 700 and 320 < y1 <= 350)
