@@ -22,8 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
-SUFFIX = "_stich"
-SERIES_SUFFIX = "_stich_series"
+SUFFIX = "_stitch"
+SERIES_SUFFIX = "_stitch_series"
 BLEND_DEG = 6.0          # ширина плавного перехода на шве, градусы
 UPSCALE = 2              # remap берёт ближайший пиксель; вход увеличивается вдвое — шов и детали без «лесенки»
 
@@ -456,13 +456,13 @@ def add_parser(sub, seconds) -> None:
     p = sub.add_parser(
         "stitch360", help="сшить видео 360 из двух полусфер (Samsung Gear 360) в панораму 2:1",
         description="Сшивает ролики камеры 360 с двумя объективами «рыбий глаз» (кадр — два круга рядом) "
-                    "в равнопромежуточную панораму 2:1 с пометкой 360. Результат — <имя>_stich.mp4 рядом "
-                    "с исходником, с --series — один ролик <каталог>_stich_series.mp4. Дата съёмки в "
+                    "в равнопромежуточную панораму 2:1 с пометкой 360. Результат — <имя>_stitch.mp4 рядом "
+                    "с исходником, с --series — один ролик <каталог>_stitch_series.mp4. Дата съёмки в "
                     "метаданных и даты файла сохраняются. Уже сшитые файлы (с пометкой 360 или _Stitch, "
-                    "_stich в имени) пропускаются.")
+                    "_stitch в имени) пропускаются.")
     p.add_argument("masks", nargs="+", metavar="МАСКА", help="файлы или маски, например E:\\360\\*.MP4")
     p.add_argument("--series", action="store_true",
-                   help="склеить все ролики (по времени съёмки) в один <каталог>_stich_series.mp4 "
+                   help="склеить все ролики (по времени съёмки) в один <каталог>_stitch_series.mp4 "
                         "вместо отдельных файлов")
     p.add_argument("--calibration", metavar="ФАЙЛ.json",
                    help="файл калибровки объективов: если есть — берётся из него, иначе считается и "

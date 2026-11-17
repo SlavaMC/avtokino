@@ -283,13 +283,13 @@ def is_excluded(rel: str, patterns: list[str]) -> bool:
 
 def _stitched_elsewhere(p: Path, info) -> bool:
     """Исходник из двух полусфер (2:1 без пометки 360), для которого рядом уже лежит результат
-    stitch360: <имя>_stich.mp4 или серия <каталог>_stich_series.mp4."""
+    stitch360: <имя>_stitch.mp4 или серия <каталог>_stitch_series.mp4."""
     if info.spherical or abs(info.width - 2 * info.height) > 2:
         return False
     names = {f.name.casefold() for f in p.parent.iterdir() if f.is_file()}
-    if f"{p.stem}_stich.mp4".casefold() in names:
+    if f"{p.stem}_stitch.mp4".casefold() in names:
         return True
-    series = f"{p.parent.name}_stich_series".casefold()
+    series = f"{p.parent.name}_stitch_series".casefold()
     return any(n.startswith(series) and n.endswith(".mp4") for n in names)
 
 
