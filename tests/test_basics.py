@@ -222,3 +222,32 @@ class PanoramaTest(unittest.TestCase):
         img[50:350, 100:700] = 200
         x0, y0, x1, y1 = inscribed_rect(img)
         self.assertTrue(100 <= x0 < 130 and 50 <= y0 < 80 and 670 < x1 <= 700 and 320 < y1 <= 350)
+
+
+class TranscribeTest(unittest.TestCase):
+    def _seg(self, words):
+        from types import SimpleNamespace as N
+        ws, t = [], 0.0
+        for w in words:
+            ws.append(N(word=" " + w, start=t, end=t + 0.4))
+            t += 0.5
+        return N(start=0.0, end=t, text=" ".join(words), words=ws)
+
+    def test_split_and_formats(self):
+        from avtokino.transcribe import split_lines, to_dated, to_srt
+        seg = self._seg("Живи долго, интересно, как говорится, что тебе не нравится? Ну а мы тебя будем хвалить.".split())
+        lines = split_lines([seg])
+        self.assertEqual(lines[0].text, "Живи долго, интересно, как говорится, что тебе не нравится?")
+        self.assertEqual(lines[1].text, "Ну а мы тебя будем хвалить.")
+        self.assertIn("00:00:00,000 --> ", to_srt(lines))
+        dated = to_dated(lines, datetime(2026, 11, 13, 18, 0, 0)).splitlines()
+        self.assertTrue(dated[0].startswith("2026-11-13 18:00:00: Живи"))
+        self.assertTrue(dated[1].startswith("2026-11-13 18:00:04: Ну"))
+
+    def test_long_line_breaks_after_comma(self):
+        from avtokino.transcribe import MAX_CHARS, split_lines
+        words = ("раз два три четыре пять шесть, семь восемь девять десять одиннадцать двенадцать "
+                 "тринадцать четырнадцать пятнадцать шестнадцать семнадцать").split()
+        lines = split_lines([self._seg(words)])
+        self.assertTrue(all(len(ln.text) <= MAX_CHARS for ln in lines))
+        self.assertTrue(lines[0].text.endswith(","))

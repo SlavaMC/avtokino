@@ -767,6 +767,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_stitch(sub, seconds)
     from .panorama import add_parser as _add_panorama
     _add_panorama(sub)
+    from .transcribe import add_parser as _add_transcribe
+    _add_transcribe(sub)
 
     a = p.parse_args(argv)
     if a.command == "trim" and (a.start is not None or a.end is not None) and (a.cut_start or a.cut_end):

@@ -4,3 +4,4 @@ tzdata; sys_platform == "win32"   # часовые пояса для --tz на W
 numpy>=1.24          # только для команды avtokino.tools sync
 rawpy>=0.19          # RAW для команды avtokino.tools panorama (необязательно)
 opencv-python-headless>=4.8   # склейка панорам: avtokino.tools panorama (необязательно)
+faster-whisper>=1.0  # распознавание речи: avtokino.tools transcribe (необязательно)
