@@ -275,3 +275,15 @@ class SysProxyTest(unittest.TestCase):
             self.assertNotIn("HTTPS_PROXY", os.environ)
         with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://x:1"}, clear=True):
             self.assertIn("переменная", sysproxy.apply())
+
+
+class HallucinationTest(unittest.TestCase):
+    def test_filter(self):
+        from types import SimpleNamespace as N
+        from avtokino.transcribe import is_hallucination as h
+        seg = lambda t, ns=0.1, lp=-0.3: N(text=t, no_speech_prob=ns, avg_logprob=lp)
+        for t in ("Субтитры создавал DimaTorzok", " Субтитры делал DimaTorzok", "Продолжение следует...", "[Музыка]"):
+            self.assertTrue(h(seg(t)), t)
+        for t in ("Ну что, поздравляем папу!", "Спасибо за просмотр, а теперь к столу", "Мы сделали субтитры"):
+            self.assertFalse(h(seg(t)), t)
+        self.assertTrue(h(seg("Ага", ns=0.9, lp=-1.5)))

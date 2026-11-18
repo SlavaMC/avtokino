@@ -414,6 +414,11 @@ python -m avtokino.tools panorama "IMG_10*.jpg" --brightness 0.5 --contrast 1.3
 настроек. Задать прокси вручную можно через `--proxy host:port` (или `http://user:pass@host:port`),
 отключить через `--proxy off`. SOCKS-прокси не поддерживаются.
 
+На тишине, музыке и шуме Whisper иногда «придумывает» фразы из своих обучающих данных, например
+«Субтитры создавал DimaTorzok» или «Продолжение следует…». Такие строки выбрасываются, как и фрагменты,
+где модель сама считает, что речи нет. Выброшенное команда пишет в журнал («выброшено 0:40: …»).
+Опция `--keep-all` отключает этот фильтр.
+
 ```
 python -m avtokino.tools transcribe "E:\backup\20261113_PapaDR\20261113_PapaDR.mp4"
 python -m avtokino.tools transcribe "E:\video\*.mp4" --language ru --embed

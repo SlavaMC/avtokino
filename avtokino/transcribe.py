@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +34,26 @@ class Line:
 
 
 # --- разбиение на строки ------------------------------------------------------------
+
+# Известные «галлюцинации» Whisper: подписи авторов любительских субтитров и концовки роликов
+# из обучающих данных. Модель выдаёт их на тишине, музыке и шуме.
+_HALLU_ANY = re.compile(
+    r"субтитр\w*\s+(?:\w+\s+)?(?:созда|дела|сдела|подготов|редакт|перев)|редактор субтитров|корректор"
+    r"|dimatorzok|amara\.org|subtitles by|captions by|субтитры:|\bпереводчик\b", re.I)
+_HALLU_WHOLE = re.compile(
+    r"(?:продолжение следует|спасибо за (?:просмотр|внимание)|подписывайтесь на (?:наш )?канал"
+    r"|ставьте лайки?|до (?:новых )?встреч|thanks? (?:you )?for watching|музыка|аплодисменты"
+    r"|динамичная музыка|спокойная музыка|смех|\W*)(?:[\s!.…,]*)", re.I)
+
+
+def is_hallucination(seg) -> bool:
+    """Фрагмент, которого, скорее всего, нет в звуке."""
+    text = re.sub(r"[\[\]()♪*«»\"]", " ", seg.text).strip().lower()
+    if not text or _HALLU_ANY.search(text) or _HALLU_WHOLE.fullmatch(text):
+        return True
+    # правило самого Whisper: модель считает, что речи нет, и не уверена в тексте
+    return getattr(seg, "no_speech_prob", 0) > 0.6 and getattr(seg, "avg_logprob", 0) < -1.0
+
 
 def split_lines(segments) -> list[Line]:
     """Сегменты Whisper (со словами) -> строки субтитров: конец фразы, не длиннее MAX_CHARS
@@ -245,12 +266,18 @@ def transcribe(args) -> int:
         dur = len(audio) / 16000
         segments, info = model.transcribe(
             audio, language=args.language, beam_size=args.beam, word_timestamps=True,
-            vad_filter=not args.no_vad, condition_on_previous_text=False)
-        lines = []
+            vad_filter=not args.no_vad, condition_on_previous_text=False,
+            hallucination_silence_threshold=2.0)
+        lines, dropped = [], []
         for seg in segments:          # генератор: распознавание идёт по мере чтения
-            lines.extend(split_lines([seg]))
+            if not args.keep_all and is_hallucination(seg):
+                dropped.append(seg)
+            else:
+                lines.extend(split_lines([seg]))
             print(f"\r  распознано {_fmt(seg.end)} из {_fmt(dur)}", end="", flush=True)
         print()
+        for seg in dropped:
+            print(f"  выброшено {_fmt(seg.start)}: {seg.text.strip()}")
         lines = split_lines_fix(lines)
         if not args.language:
             print(f"  язык: {info.language} (уверенность {info.language_probability:.0%})")
@@ -314,6 +341,9 @@ def add_parser(sub) -> None:
     p.add_argument("--proxy", metavar="АДРЕС",
                    help="прокси для загрузки модели: host:port, http://user:pass@host:port или off "
                         "(по умолчанию системный прокси Windows, если включён)")
+    p.add_argument("--keep-all", action="store_true",
+                   help="не выбрасывать «галлюцинации» (подписи авторов субтитров, «Продолжение следует…», "
+                        "текст на тишине)")
     p.add_argument("--threads", type=int, help="потоков процессора (по умолчанию все)")
     p.add_argument("--no-vad", action="store_true",
                    help="не вырезать паузы и шум перед распознаванием (по умолчанию вырезаются: меньше "
