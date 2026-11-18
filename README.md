@@ -408,6 +408,12 @@ python -m avtokino.tools panorama "IMG_10*.jpg" --brightness 0.5 --contrast 1.3
 лежат в папке `blobs` модели с расширением `.incomplete`. Если загрузка прервалась,
 запустите команду ещё раз, и она продолжит с того же места.
 
+Для загрузки используется системный прокси Windows, если он включён в «Параметры → Сеть и
+Интернет → Прокси». Подходят ручной адрес, сценарий настройки (PAC) и автоопределение. Какой прокси
+выбран, команда пишет в строке «прокси: …». Переменные `HTTPS_PROXY`/`HTTP_PROXY` важнее системных
+настроек. Задать прокси вручную можно через `--proxy host:port` (или `http://user:pass@host:port`),
+отключить через `--proxy off`. SOCKS-прокси не поддерживаются.
+
 ```
 python -m avtokino.tools transcribe "E:\backup\20261113_PapaDR\20261113_PapaDR.mp4"
 python -m avtokino.tools transcribe "E:\video\*.mp4" --language ru --embed

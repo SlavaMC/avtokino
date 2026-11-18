@@ -161,6 +161,10 @@ def _model(args):
             print(f"Модель {name}: {path}")
         except Exception:  # noqa: BLE001 — модели ещё нет, качаем с индикатором
             print(f"Модель {name} скачивается один раз (0,5–3 ГБ) в {huggingface_hub.constants.HF_HUB_CACHE}")
+            from . import sysproxy
+            via = sysproxy.apply(getattr(args, "proxy", None))
+            print(f"  прокси: {via}" if via else "  прокси: нет, прямое подключение")
+            huggingface_hub.close_session()  # новое соединение подхватит прокси из окружения
             import fnmatch
             import threading
             info = huggingface_hub.HfApi().model_info(repo, files_metadata=True)
@@ -307,6 +311,9 @@ def add_parser(sub) -> None:
     p.add_argument("--start-time", metavar="'ГГГГ-ММ-ДД ЧЧ:ММ:СС'",
                    help="время начала записи вручную (для всех файлов), вместо даты из метаданных")
     p.add_argument("--beam", type=int, default=5, help="ширина поиска (5; 1 — быстрее, чуть грубее)")
+    p.add_argument("--proxy", metavar="АДРЕС",
+                   help="прокси для загрузки модели: host:port, http://user:pass@host:port или off "
+                        "(по умолчанию системный прокси Windows, если включён)")
     p.add_argument("--threads", type=int, help="потоков процессора (по умолчанию все)")
     p.add_argument("--no-vad", action="store_true",
                    help="не вырезать паузы и шум перед распознаванием (по умолчанию вырезаются: меньше "

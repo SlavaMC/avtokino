@@ -1,3 +1,4 @@
+import os
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -251,3 +252,26 @@ class TranscribeTest(unittest.TestCase):
         lines = split_lines([self._seg(words)])
         self.assertTrue(all(len(ln.text) <= MAX_CHARS for ln in lines))
         self.assertTrue(lines[0].text.endswith(","))
+
+
+class SysProxyTest(unittest.TestCase):
+    def test_parse(self):
+        from avtokino.sysproxy import parse_proxy_list, bypass_to_no_proxy
+        self.assertEqual(parse_proxy_list("10.0.0.1:3128"), "http://10.0.0.1:3128")
+        self.assertEqual(parse_proxy_list("http=a:1;https=b:2"), "http://b:2")
+        self.assertEqual(parse_proxy_list("http=a:1"), "http://a:1")
+        self.assertEqual(parse_proxy_list("PROXY p:8080; DIRECT"), "http://p:8080")
+        self.assertIsNone(parse_proxy_list("DIRECT"))
+        self.assertEqual(bypass_to_no_proxy("<local>;*.corp.ru;intra"),
+                         "localhost,127.0.0.1,::1,.corp.ru,intra")
+
+    def test_apply(self):
+        from unittest import mock
+        from avtokino import sysproxy
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIn("--proxy", sysproxy.apply("p:3128"))
+            self.assertEqual(os.environ["HTTPS_PROXY"], "http://p:3128")
+            self.assertEqual(sysproxy.apply("off"), "")
+            self.assertNotIn("HTTPS_PROXY", os.environ)
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://x:1"}, clear=True):
+            self.assertIn("переменная", sysproxy.apply())
