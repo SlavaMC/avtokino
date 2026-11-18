@@ -402,6 +402,12 @@ python -m avtokino.tools panorama "IMG_10*.jpg" --brightness 0.5 --contrast 1.3
 и платных сервисов; модель скачивается один раз при первом запуске. Нужен пакет:
 `pip install faster-whisper`.
 
+При первом запуске модель (large-v3-turbo, около 1,6 ГБ) скачивается в
+`%USERPROFILE%\.cache\huggingface\hub`. Команда показывает строку «скачано N из M МБ».
+Если данные перестали приходить, она пишет «нет данных N с». Недокачанные файлы
+лежат в папке `blobs` модели с расширением `.incomplete`. Если загрузка прервалась,
+запустите команду ещё раз, и она продолжит с того же места.
+
 ```
 python -m avtokino.tools transcribe "E:\backup\20261113_PapaDR\20261113_PapaDR.mp4"
 python -m avtokino.tools transcribe "E:\video\*.mp4" --language ru --embed

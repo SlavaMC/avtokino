@@ -134,13 +134,69 @@ def _audio(ffmpeg: str, path: Path):
 
 
 def _model(args):
+    # до импорта huggingface_hub: без предупреждений о symlinks в Windows, загрузка обычным HTTP
+    # (новый протокол xet в Windows бывает «висит» без признаков жизни), таймаут вместо вечного ожидания
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+    os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
     try:
         from faster_whisper import WhisperModel
+        from faster_whisper.utils import _MODELS
+        import huggingface_hub
     except ImportError:
         print("Для команды transcribe нужен пакет faster-whisper: pip install faster-whisper", file=sys.stderr)
         raise SystemExit(2)
-    print(f"Модель {args.model} (при первом запуске скачивается, 0,5–3 ГБ)...")
-    return WhisperModel(args.model, device="cpu", compute_type="int8",
+    name = args.model
+    if Path(name).is_dir():
+        path = name
+    else:
+        repo = name if "/" in name else _MODELS.get(name)
+        if repo is None:
+            print(f"Неизвестная модель {name}; есть: {', '.join(_MODELS)}", file=sys.stderr)
+            raise SystemExit(2)
+        patterns = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
+        try:
+            path = huggingface_hub.snapshot_download(repo, allow_patterns=patterns, local_files_only=True)
+            print(f"Модель {name}: {path}")
+        except Exception:  # noqa: BLE001 — модели ещё нет, качаем с индикатором
+            print(f"Модель {name} скачивается один раз (0,5–3 ГБ) в {huggingface_hub.constants.HF_HUB_CACHE}")
+            import fnmatch
+            import threading
+            info = huggingface_hub.HfApi().model_info(repo, files_metadata=True)
+            files = [(x.rfilename, x.size or 0) for x in info.siblings
+                     if any(fnmatch.fnmatch(x.rfilename, pat) for pat in patterns)]
+            total = sum(sz for _, sz in files)
+            folder = Path(huggingface_hub.constants.HF_HUB_CACHE) / ("models--" + repo.replace("/", "--"))
+            result: dict = {}
+
+            def fetch():
+                try:
+                    for f, _ in sorted(files, key=lambda x: x[1]):
+                        result["path"] = huggingface_hub.hf_hub_download(repo, f)
+                except Exception as e:  # noqa: BLE001
+                    result["error"] = e
+
+            th = threading.Thread(target=fetch, daemon=True)
+            th.start()
+            # свой индикатор: сколько уже лежит в кэше (в т.ч. недокачанные .incomplete)
+            last, still = -1, 0
+            while th.is_alive():
+                th.join(2)
+                got_b = sum(f.stat().st_size for f in folder.rglob("*") if f.is_file() and not f.is_symlink()) if folder.exists() else 0
+                still = still + 2 if got_b == last else 0
+                last = got_b
+                note = f"  (нет данных {still} с — проверьте интернет)" if still >= 30 else ""
+                print(f"\r  скачано {got_b / 2**20:,.0f} из {total / 2**20:,.0f} МБ{note}      ",
+                      end="", flush=True)
+            print()
+            if "error" in result:
+                print(f"Не удалось скачать модель: {result['error']}", file=sys.stderr)
+                raise SystemExit(1)
+            got = result["path"]
+            path = str(Path(got).parent)
+    print("Загрузка модели в память...")
+    return WhisperModel(path, device="cpu", compute_type="int8",
                         cpu_threads=args.threads or (os.cpu_count() or 4))
 
 
